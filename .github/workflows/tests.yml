@@ -1,0 +1,29 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  unit:
+    name: Workflow-Logik und Bridge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Workflow-Logik
+        run: node --test test/unit/workflow.test.js
+      - name: Bridge
+        working-directory: bridge
+        run: npm ci && npm test
+
+  e2e:
+    name: End-to-End (n8n mit Mock-Diensten)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh test/e2e/run.sh

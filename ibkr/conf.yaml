@@ -1,0 +1,34 @@
+# Konfiguration des IBKR Client Portal Gateway (wird von IBeam beim Start übernommen).
+# Entspricht der IBeam-Vorlage; ergänzt ist nur der Zugriff aus dem Docker-Netz
+# dieses Projekts (172.*), damit n8n das Gateway erreichen darf.
+ip2loc: "US"
+proxyRemoteSsl: true
+proxyRemoteHost: "https://api.ibkr.com"
+listenPort: 5000
+listenSsl: true
+ccp: false
+svcEnvironment: "v1"
+sslCert: "vertx.jks"
+sslPwd: "mywebapi"
+authDelay: 3000
+portalBaseURL: ""
+serverOptions:
+  blockedThreadCheckInterval: 1000000
+  eventLoopPoolSize: 20
+  workerPoolSize: 20
+  maxWorkerExecuteTime: 100
+  internalBlockingPoolSize: 20
+cors:
+  origin.allowed: "*"
+  allowCredentials: false
+webApps:
+  - name: "demo"
+    index: "index.html"
+ips:
+  allow:
+    - 10.*
+    - 192.*
+    - 172.* # Docker-Netze (Compose vergibt 172.18.x.x und höher)
+    - 127.0.0.1
+  deny:
+    - 0.0.0.0/0 # alle anderen Adressen

@@ -1,0 +1,32 @@
+# Ergänzt docker-compose.yml für den End-to-End-Test: Ein Mock-Server spielt
+# sec-api.io, Yahoo Finance, Anthropic, Telegram und IBKR; der Dienst "e2e"
+# führt die Szenarien aus. Start über test/e2e/run.sh.
+services:
+  mock:
+    build: ./bridge
+    command: ["node", "/e2e/mock-server.js"]
+    environment:
+      NODE_PATH: /app/node_modules
+    volumes:
+      - ./test/e2e:/e2e:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/__control/status >/dev/null || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  bridge:
+    depends_on:
+      mock:
+        condition: service_healthy
+
+  e2e:
+    build: ./bridge
+    command: ["node", "--test", "--test-concurrency=1", "/e2e/scenarios.test.js"]
+    depends_on:
+      mock:
+        condition: service_healthy
+      bridge:
+        condition: service_started
+    volumes:
+      - ./test/e2e:/e2e:ro
