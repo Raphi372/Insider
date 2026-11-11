@@ -7,7 +7,7 @@ on:
 
 jobs:
   unit:
-    name: Workflow-Logik und Bridge
+    name: Workflow-Logik, Bridge und Research
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,6 +19,9 @@ jobs:
       - name: Bridge
         working-directory: bridge
         run: npm ci && npm test
+      - name: Protokoll, Auswertung, Backtest
+        working-directory: research
+        run: npm test
 
   e2e:
     name: End-to-End (n8n mit Mock-Diensten)

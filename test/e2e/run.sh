@@ -31,6 +31,30 @@ status=0
 compose up -d ${E2E_UP_FLAGS:---build} n8n bridge mock || status=$?
 if [ "$status" -eq 0 ]; then compose run --rm e2e || status=$?; fi
 
+# Auswertung und Backtest laufen im selben Stack gegen die Mock-Daten.
+expect() { # expect "<Ausgabe>" "<erwarteter Text>"
+  if ! printf '%s\n' "$1" | grep -q -- "$2"; then
+    echo "FEHLT in der Ausgabe: $2"
+    status=1
+  fi
+}
+if [ "$status" -eq 0 ]; then
+  echo "--- research report ---"
+  report=$(compose run --rm research report) || status=$?
+  printf '%s\n' "$report"
+  expect "$report" "4 Signale protokolliert, 4 mit Kursdaten"
+  expect "$report" "| STARK "
+  expect "$report" "| Order gesendet "
+fi
+if [ "$status" -eq 0 ]; then
+  echo "--- research backtest ---"
+  backtest=$(compose run --rm research backtest --from 2026-11-01 --to 2026-11-30 --lookback-years 0) || status=$?
+  printf '%s\n' "$backtest" | head -40
+  expect "$backtest" "Insiderkäufe im Zeitraum (alle Größen): 6"
+  expect "$backtest" "auswertbar: 5"
+  expect "$backtest" "| 20 Handelstage "
+fi
+
 if [ "$status" -ne 0 ]; then
   echo "--- Test fehlgeschlagen, Logs der Dienste ---"
   compose logs --no-color --tail=150 n8n-init n8n bridge mock || true

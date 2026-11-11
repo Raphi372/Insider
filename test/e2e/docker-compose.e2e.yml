@@ -20,6 +20,15 @@ services:
       mock:
         condition: service_healthy
 
+  # Im Test liegt das Protokoll in einem Docker-Volume statt in ./data.
+  journal:
+    volumes:
+      - e2e_data:/data
+
+  research:
+    volumes:
+      - e2e_data:/data
+
   e2e:
     build: ./bridge
     command: ["node", "--test", "--test-concurrency=1", "/e2e/scenarios.test.js"]
@@ -30,3 +39,6 @@ services:
         condition: service_started
     volumes:
       - ./test/e2e:/e2e:ro
+
+volumes:
+  e2e_data:

@@ -114,6 +114,12 @@
               "type": "string"
             },
             {
+              "id": "5186dca6-04cc-48e0-a218-e5610ddbbdc2",
+              "name": "cfg.journalBaseUrl",
+              "value": "={{ $env.JOURNAL_BASE_URL || 'http://journal:8090' }}",
+              "type": "string"
+            },
+            {
               "id": "9c619ff5-a066-4030-a0db-fb44da500b82",
               "name": "cfg.model",
               "value": "={{ $env.ANTHROPIC_MODEL || 'claude-haiku-5-5' }}",
@@ -679,7 +685,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Baut die Telegram-Nachricht (HTML) und den Order-Vorschlag.\n// Zahlen stammen aus dem Faktenblock, nicht aus der Antwort des Modells.\n\nconst cfg = $('Config').first().json.cfg;\nconst { facts } = $('Build_Prompt').first().json;\nconst llm = $('LLM_Analysis').first().json || {};\nconst conidResponse = $input.first().json || {};\n\nconst esc = (value) => String(value === null || value === undefined ? '' : value)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst fmt = (value, digits = 2) => Number(value).toLocaleString('de-DE', {\n  minimumFractionDigits: digits, maximumFractionDigits: digits,\n});\nconst fmtInt = (value) => Number(value).toLocaleString('de-DE', { maximumFractionDigits: 0 });\nconst fmtUsd = (value) => {\n  const abs = Math.abs(value);\n  if (abs >= 1e9) return `${fmt(value / 1e9)} Mrd. $`;\n  if (abs >= 1e6) return `${fmt(value / 1e6)} Mio. $`;\n  return `${fmt(value, abs >= 1000 ? 0 : 2)} $`;\n};\nconst signed = (value, digits = 1) => `${value > 0 ? '+' : ''}${fmt(value, digits)} %`;\n\n// ---- Antwort von Claude lesen ----------------------------------------------\n// Inhalt nach Typ suchen: Vor dem Text können thinking-Blöcke stehen.\nlet analysis = null;\nlet analysisNote = null;\nif (Array.isArray(llm.content)) {\n  const textBlock = llm.content.find((block) => block.type === 'text');\n  if (llm.stop_reason === 'refusal') {\n    analysisNote = 'Das Modell hat die Bewertung abgelehnt.';\n  } else {\n    try {\n      const parsed = JSON.parse(textBlock.text);\n      if (!['SCHWACH', 'MITTEL', 'STARK'].includes(parsed.signal)) throw new Error('signal fehlt');\n      analysis = parsed;\n    } catch (err) {\n      analysisNote = llm.stop_reason === 'max_tokens'\n        ? 'Die Antwort des Modells wurde abgeschnitten.'\n        : 'Die Antwort des Modells war nicht lesbar.';\n    }\n  }\n} else {\n  const error = llm.error || {};\n  const detail = typeof error === 'string' ? error : (error.message || '');\n  analysisNote = `KI-Analyse nicht verfügbar${detail ? `: ${String(detail).slice(0, 200)}` : '.'}`;\n}\n\n// ---- Order-Vorschlag (Bracket) ---------------------------------------------\n// Unter 1 $ handeln US-Aktien in Schritten von 0,0001 $, darüber in Cent.\nconst tick = (price) => (price >= 1 ? Math.round(price * 100) / 100 : Math.round(price * 10000) / 10000);\n\nconst entry = tick(facts.purchase.avgPrice);\nconst quantity = cfg.orderQuantity > 0\n  ? Math.floor(cfg.orderQuantity)\n  : Math.floor(cfg.orderBudgetUsd / entry);\nconst stopLoss = tick(entry * (1 - cfg.stopLossPct / 100));\nconst takeProfit = tick(entry * (1 + cfg.takeProfitPct / 100));\n\n// IBKR schreibt Aktienklassen mit Leerzeichen (BRK B), die SEC mit Punkt (BRK.B).\nconst ibkrSymbol = facts.ticker.replace(/[.\\-]/g, ' ');\nconst listings = Array.isArray(conidResponse[ibkrSymbol]) ? conidResponse[ibkrSymbol] : [];\nconst usContracts = listings\n  .filter((listing) => !listing.assetClass || listing.assetClass === 'STK')\n  .flatMap((listing) => listing.contracts || [])\n  .filter((contract) => contract.isUS);\nconst conid = usContracts.length > 0 ? usContracts[0].conid : null;\n\nlet orderNote = null;\nif (!conid) {\n  orderNote = conidResponse.error\n    ? 'IBKR-Gateway nicht erreichbar oder nicht eingeloggt – kein Order-Vorschlag.'\n    : `Kein US-Kontrakt für ${facts.ticker} bei IBKR gefunden – kein Order-Vorschlag.`;\n} else if (quantity < 1) {\n  orderNote = `Budget (${fmtUsd(cfg.orderBudgetUsd)}) reicht nicht für eine Aktie zu ${fmt(entry)} $ – kein Order-Vorschlag.`;\n} else if (!(stopLoss > 0 && stopLoss < entry && entry < takeProfit)) {\n  orderNote = 'Stop-Loss/Take-Profit ergeben keine gültige Bracket-Order – STOP_LOSS_PCT und TAKE_PROFIT_PCT prüfen.';\n}\n\n// Telegram erlaubt höchstens 64 Bytes Button-Daten. Die Order steckt komplett\n// darin; ein Zwischenspeicher ist deshalb nicht nötig.\nconst callbackOrder = `o|${facts.ticker}|${conid}|${quantity}|${entry}|${stopLoss}|${takeProfit}`;\nif (!orderNote && callbackOrder.length > 64) orderNote = 'Order-Daten zu lang für einen Telegram-Button – kein Order-Vorschlag.';\nconst hasOrder = !orderNote;\n\n// ---- Nachricht ---------------------------------------------------------------\nconst icons = { STARK: '🟢', MITTEL: '🟡', SCHWACH: '⚪' };\nconst p = facts.purchase;\nconst m = facts.market;\nconst lines = [];\n\nlines.push(analysis\n  ? `${icons[analysis.signal]} <b>Insiderkauf ${esc(facts.ticker)}</b> – Signal: <b>${analysis.signal}</b>`\n  : `ℹ️ <b>Insiderkauf ${esc(facts.ticker)}</b> – ohne KI-Einstufung`);\nlines.push(esc(facts.issuerName));\nlines.push('');\nlines.push(`<b>Insider:</b> ${esc(facts.insiderName)} – ${esc(facts.role)}`);\nlines.push(`<b>Kauf:</b> ${fmtInt(p.shares)} Aktien zu Ø ${fmt(p.avgPrice)} $ = ${fmtUsd(p.value)}`);\nlines.push(`<b>Handelstag:</b> ${esc(p.firstDate === p.lastDate ? p.lastDate : `${p.firstDate} bis ${p.lastDate}`)}`);\nlines.push(`<b>Bestand danach:</b> ${fmtInt(p.sharesOwnedAfter)} Aktien${p.holdingsIncreasePct === null ? '' : ` (${signed(p.holdingsIncreasePct)})`}`);\n\nif (m) {\n  const priceParts = [];\n  if (m.price !== null) priceParts.push(`Kurs ${fmt(m.price)} $${facts.derived.currentPriceVsInsiderPricePct === null ? '' : ` (${signed(facts.derived.currentPriceVsInsiderPricePct)} ggü. Insiderpreis)`}`);\n  if (m.marketCap !== null) priceParts.push(`Marktkap. ${fmtUsd(m.marketCap)}`);\n  if (priceParts.length) lines.push(`<b>Markt:</b> ${priceParts.join(' · ')}`);\n  const ratioParts = [];\n  ratioParts.push(`KGV ${m.trailingPE === null ? 'n. v.' : fmt(m.trailingPE, 1)}`);\n  ratioParts.push(`Short Interest ${m.shortPercentOfFloat === null ? 'n. v.' : `${fmt(m.shortPercentOfFloat, 1)} % des Floats`}`);\n  lines.push(`<b>Kennzahlen:</b> ${ratioParts.join(' · ')}`);\n} else {\n  lines.push('<b>Markt:</b> Marktdaten nicht verfügbar');\n}\n\nif (facts.history) {\n  const h = facts.history;\n  let text = `${h.priorPurchases} frühere Käufe, ${h.priorSales} Verkäufe`;\n  if (h.trackRecord) {\n    text += ` · ${h.trackRecord.inProfit} von ${h.trackRecord.purchases} Käufen heute im Plus (Ø ${signed(h.trackRecord.avgReturnPct)}, nicht splitbereinigt)`;\n  }\n  lines.push(`<b>Historie:</b> ${text}`);\n} else {\n  lines.push('<b>Historie:</b> nicht verfügbar');\n}\n\nif (facts.institutions && facts.institutions.length > 0) {\n  const holders = facts.institutions\n    .map((i) => `${esc(i.manager)} (${fmtInt(i.shares)} Stück, ${esc(i.period)})`).join('; ');\n  lines.push(`<b>13F-Halter:</b> ${holders}`);\n} else {\n  lines.push(`<b>13F-Halter:</b> ${facts.institutions ? 'keine in den jüngsten Meldungen' : 'nicht verfügbar'}`);\n}\n\nlines.push('');\nif (analysis) {\n  lines.push('<b>Einschätzung</b>');\n  lines.push(esc(String(analysis.begruendung).slice(0, 700)));\n  for (const item of (analysis.pro || []).slice(0, 3)) lines.push(`➕ ${esc(String(item).slice(0, 200))}`);\n  for (const item of (analysis.contra || []).slice(0, 3)) lines.push(`➖ ${esc(String(item).slice(0, 200))}`);\n  if ((analysis.datenluecken || []).length > 0) {\n    lines.push(`⚠️ Datenlücken: ${esc(analysis.datenluecken.slice(0, 3).join('; ').slice(0, 300))}`);\n  }\n} else {\n  lines.push(`⚠️ ${esc(analysisNote)}`);\n}\n\nlines.push('');\nif (hasOrder) {\n  lines.push('<b>Order-Vorschlag (Paper-Konto)</b>');\n  lines.push(`Kauf ${fmtInt(quantity)} × ${esc(facts.ticker)}, Limit ${fmt(entry, entry >= 1 ? 2 : 4)} $ (${fmtUsd(quantity * entry)})`);\n  lines.push(`Stop-Loss ${fmt(stopLoss, entry >= 1 ? 2 : 4)} $ (−${fmt(cfg.stopLossPct, 0)} %) · Take-Profit ${fmt(takeProfit, entry >= 1 ? 2 : 4)} $ (+${fmt(cfg.takeProfitPct, 0)} %)`);\n  lines.push('Es wird nichts gesendet, solange du nicht auf den Button tippst.');\n} else {\n  lines.push(`<i>${esc(orderNote)}</i>`);\n}\nif (facts.link) lines.push(`<a href=\"${esc(facts.link)}\">Form 4 bei der SEC</a>`);\n\nreturn [{\n  json: {\n    chatId: cfg.telegramChatId,\n    message: lines.join('\\n').slice(0, 4000),\n    hasOrder,\n    callbackOrder,\n    callbackDiscard: `x|${facts.ticker}`,\n    signal: analysis ? analysis.signal : null,\n    order: hasOrder ? { ticker: facts.ticker, conid, quantity, entry, stopLoss, takeProfit } : null,\n  },\n}];"
+        "jsCode": "// Baut die Telegram-Nachricht (HTML) und den Order-Vorschlag.\n// Zahlen stammen aus dem Faktenblock, nicht aus der Antwort des Modells.\n\nconst cfg = $('Config').first().json.cfg;\nconst { facts } = $('Build_Prompt').first().json;\nconst llm = $('LLM_Analysis').first().json || {};\nconst conidResponse = $input.first().json || {};\n\nconst esc = (value) => String(value === null || value === undefined ? '' : value)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst fmt = (value, digits = 2) => Number(value).toLocaleString('de-DE', {\n  minimumFractionDigits: digits, maximumFractionDigits: digits,\n});\nconst fmtInt = (value) => Number(value).toLocaleString('de-DE', { maximumFractionDigits: 0 });\nconst fmtUsd = (value) => {\n  const abs = Math.abs(value);\n  if (abs >= 1e9) return `${fmt(value / 1e9)} Mrd. $`;\n  if (abs >= 1e6) return `${fmt(value / 1e6)} Mio. $`;\n  return `${fmt(value, abs >= 1000 ? 0 : 2)} $`;\n};\nconst signed = (value, digits = 1) => `${value > 0 ? '+' : ''}${fmt(value, digits)} %`;\n\n// ---- Antwort von Claude lesen ----------------------------------------------\n// Inhalt nach Typ suchen: Vor dem Text können thinking-Blöcke stehen.\nlet analysis = null;\nlet analysisNote = null;\nif (Array.isArray(llm.content)) {\n  const textBlock = llm.content.find((block) => block.type === 'text');\n  if (llm.stop_reason === 'refusal') {\n    analysisNote = 'Das Modell hat die Bewertung abgelehnt.';\n  } else {\n    try {\n      const parsed = JSON.parse(textBlock.text);\n      if (!['SCHWACH', 'MITTEL', 'STARK'].includes(parsed.signal)) throw new Error('signal fehlt');\n      analysis = parsed;\n    } catch (err) {\n      analysisNote = llm.stop_reason === 'max_tokens'\n        ? 'Die Antwort des Modells wurde abgeschnitten.'\n        : 'Die Antwort des Modells war nicht lesbar.';\n    }\n  }\n} else {\n  const error = llm.error || {};\n  const detail = typeof error === 'string' ? error : (error.message || '');\n  analysisNote = `KI-Analyse nicht verfügbar${detail ? `: ${String(detail).slice(0, 200)}` : '.'}`;\n}\n\n// ---- Order-Vorschlag (Bracket) ---------------------------------------------\n// Unter 1 $ handeln US-Aktien in Schritten von 0,0001 $, darüber in Cent.\nconst tick = (price) => (price >= 1 ? Math.round(price * 100) / 100 : Math.round(price * 10000) / 10000);\n\nconst entry = tick(facts.purchase.avgPrice);\nconst quantity = cfg.orderQuantity > 0\n  ? Math.floor(cfg.orderQuantity)\n  : Math.floor(cfg.orderBudgetUsd / entry);\nconst stopLoss = tick(entry * (1 - cfg.stopLossPct / 100));\nconst takeProfit = tick(entry * (1 + cfg.takeProfitPct / 100));\n\n// IBKR schreibt Aktienklassen mit Leerzeichen (BRK B), die SEC mit Punkt (BRK.B).\nconst ibkrSymbol = facts.ticker.replace(/[.\\-]/g, ' ');\nconst listings = Array.isArray(conidResponse[ibkrSymbol]) ? conidResponse[ibkrSymbol] : [];\nconst usContracts = listings\n  .filter((listing) => !listing.assetClass || listing.assetClass === 'STK')\n  .flatMap((listing) => listing.contracts || [])\n  .filter((contract) => contract.isUS);\nconst conid = usContracts.length > 0 ? usContracts[0].conid : null;\n\nlet orderNote = null;\nif (!conid) {\n  orderNote = conidResponse.error\n    ? 'IBKR-Gateway nicht erreichbar oder nicht eingeloggt – kein Order-Vorschlag.'\n    : `Kein US-Kontrakt für ${facts.ticker} bei IBKR gefunden – kein Order-Vorschlag.`;\n} else if (quantity < 1) {\n  orderNote = `Budget (${fmtUsd(cfg.orderBudgetUsd)}) reicht nicht für eine Aktie zu ${fmt(entry)} $ – kein Order-Vorschlag.`;\n} else if (!(stopLoss > 0 && stopLoss < entry && entry < takeProfit)) {\n  orderNote = 'Stop-Loss/Take-Profit ergeben keine gültige Bracket-Order – STOP_LOSS_PCT und TAKE_PROFIT_PCT prüfen.';\n}\n\n// Telegram erlaubt höchstens 64 Bytes Button-Daten. Die Order steckt komplett\n// darin; ein Zwischenspeicher ist deshalb nicht nötig.\nconst callbackOrder = `o|${facts.ticker}|${conid}|${quantity}|${entry}|${stopLoss}|${takeProfit}`;\nif (!orderNote && callbackOrder.length > 64) orderNote = 'Order-Daten zu lang für einen Telegram-Button – kein Order-Vorschlag.';\nconst hasOrder = !orderNote;\n\n// ---- Nachricht ---------------------------------------------------------------\nconst icons = { STARK: '🟢', MITTEL: '🟡', SCHWACH: '⚪' };\nconst p = facts.purchase;\nconst m = facts.market;\nconst lines = [];\n\nlines.push(analysis\n  ? `${icons[analysis.signal]} <b>Insiderkauf ${esc(facts.ticker)}</b> – Signal: <b>${analysis.signal}</b>`\n  : `ℹ️ <b>Insiderkauf ${esc(facts.ticker)}</b> – ohne KI-Einstufung`);\nlines.push(esc(facts.issuerName));\nlines.push('');\nlines.push(`<b>Insider:</b> ${esc(facts.insiderName)} – ${esc(facts.role)}`);\nlines.push(`<b>Kauf:</b> ${fmtInt(p.shares)} Aktien zu Ø ${fmt(p.avgPrice)} $ = ${fmtUsd(p.value)}`);\nlines.push(`<b>Handelstag:</b> ${esc(p.firstDate === p.lastDate ? p.lastDate : `${p.firstDate} bis ${p.lastDate}`)}`);\nlines.push(`<b>Bestand danach:</b> ${fmtInt(p.sharesOwnedAfter)} Aktien${p.holdingsIncreasePct === null ? '' : ` (${signed(p.holdingsIncreasePct)})`}`);\n\nif (m) {\n  const priceParts = [];\n  if (m.price !== null) priceParts.push(`Kurs ${fmt(m.price)} $${facts.derived.currentPriceVsInsiderPricePct === null ? '' : ` (${signed(facts.derived.currentPriceVsInsiderPricePct)} ggü. Insiderpreis)`}`);\n  if (m.marketCap !== null) priceParts.push(`Marktkap. ${fmtUsd(m.marketCap)}`);\n  if (priceParts.length) lines.push(`<b>Markt:</b> ${priceParts.join(' · ')}`);\n  const ratioParts = [];\n  ratioParts.push(`KGV ${m.trailingPE === null ? 'n. v.' : fmt(m.trailingPE, 1)}`);\n  ratioParts.push(`Short Interest ${m.shortPercentOfFloat === null ? 'n. v.' : `${fmt(m.shortPercentOfFloat, 1)} % des Floats`}`);\n  lines.push(`<b>Kennzahlen:</b> ${ratioParts.join(' · ')}`);\n} else {\n  lines.push('<b>Markt:</b> Marktdaten nicht verfügbar');\n}\n\nif (facts.history) {\n  const h = facts.history;\n  let text = `${h.priorPurchases} frühere Käufe, ${h.priorSales} Verkäufe`;\n  if (h.trackRecord) {\n    text += ` · ${h.trackRecord.inProfit} von ${h.trackRecord.purchases} Käufen heute im Plus (Ø ${signed(h.trackRecord.avgReturnPct)}, nicht splitbereinigt)`;\n  }\n  lines.push(`<b>Historie:</b> ${text}`);\n} else {\n  lines.push('<b>Historie:</b> nicht verfügbar');\n}\n\nif (facts.institutions && facts.institutions.length > 0) {\n  const holders = facts.institutions\n    .map((i) => `${esc(i.manager)} (${fmtInt(i.shares)} Stück, ${esc(i.period)})`).join('; ');\n  lines.push(`<b>13F-Halter:</b> ${holders}`);\n} else {\n  lines.push(`<b>13F-Halter:</b> ${facts.institutions ? 'keine in den jüngsten Meldungen' : 'nicht verfügbar'}`);\n}\n\nlines.push('');\nif (analysis) {\n  lines.push('<b>Einschätzung</b>');\n  lines.push(esc(String(analysis.begruendung).slice(0, 700)));\n  for (const item of (analysis.pro || []).slice(0, 3)) lines.push(`➕ ${esc(String(item).slice(0, 200))}`);\n  for (const item of (analysis.contra || []).slice(0, 3)) lines.push(`➖ ${esc(String(item).slice(0, 200))}`);\n  if ((analysis.datenluecken || []).length > 0) {\n    lines.push(`⚠️ Datenlücken: ${esc(analysis.datenluecken.slice(0, 3).join('; ').slice(0, 300))}`);\n  }\n} else {\n  lines.push(`⚠️ ${esc(analysisNote)}`);\n}\n\nlines.push('');\nif (hasOrder) {\n  lines.push('<b>Order-Vorschlag (Paper-Konto)</b>');\n  lines.push(`Kauf ${fmtInt(quantity)} × ${esc(facts.ticker)}, Limit ${fmt(entry, entry >= 1 ? 2 : 4)} $ (${fmtUsd(quantity * entry)})`);\n  lines.push(`Stop-Loss ${fmt(stopLoss, entry >= 1 ? 2 : 4)} $ (−${fmt(cfg.stopLossPct, 0)} %) · Take-Profit ${fmt(takeProfit, entry >= 1 ? 2 : 4)} $ (+${fmt(cfg.takeProfitPct, 0)} %)`);\n  lines.push('Es wird nichts gesendet, solange du nicht auf den Button tippst.');\n} else {\n  lines.push(`<i>${esc(orderNote)}</i>`);\n}\nif (facts.link) lines.push(`<a href=\"${esc(facts.link)}\">Form 4 bei der SEC</a>`);\n\nreturn [{\n  json: {\n    chatId: cfg.telegramChatId,\n    message: lines.join('\\n').slice(0, 4000),\n    hasOrder,\n    callbackOrder,\n    callbackDiscard: `x|${facts.ticker}`,\n    signal: analysis ? analysis.signal : null,\n    // Für das Signal-Protokoll: vollständige Antwort des Modells bzw. der Grund, warum sie fehlt.\n    analysis,\n    analysisNote,\n    order: hasOrder ? { ticker: facts.ticker, conid, quantity, entry, stopLoss, takeProfit } : null,\n  },\n}];"
       },
       "id": "0284ef6f-cbba-418d-aa1a-199145ab47c9",
       "name": "Build_Message",
@@ -807,7 +813,30 @@
     },
     {
       "parameters": {
-        "jsCode": "// Prüft einen Button-Klick aus Telegram und baut daraus die Bracket-Order.\n// Format der Button-Daten: o|TICKER|conid|Stück|Limit|Stop-Loss|Take-Profit\n// bzw. x|TICKER für \"Verwerfen\".\n\nconst input = $input.first().json;\nconst cfg = input.cfg;\nconst query = (input.body || {}).callback_query || {};\nconst message = query.message || {};\n\nconst result = {\n  action: 'invalid',\n  chatId: cfg.telegramChatId,\n  replyTo: message.message_id || null,\n  text: '',\n};\nconst reject = (text) => [{ json: { ...result, text } }];\n\nif (String((query.from || {}).id) !== String(cfg.telegramChatId)) {\n  return reject('⛔ Button-Klick von einem fremden Telegram-Konto ignoriert.');\n}\n\nconst parts = String(query.data || '').split('|');\n\nif (parts[0] === 'x') {\n  return [{ json: { ...result, action: 'discard', text: `🗑 Vorschlag${parts[1] ? ` für ${parts[1]}` : ''} verworfen – es wurde keine Order gesendet.` } }];\n}\n\nif (parts[0] !== 'o' || parts.length !== 7) {\n  return reject('⛔ Unbekannte Button-Daten – es wurde keine Order gesendet.');\n}\n\nconst ticker = parts[1];\nconst conid = Number(parts[2]);\nconst quantity = Number(parts[3]);\nconst entry = Number(parts[4]);\nconst stopLoss = Number(parts[5]);\nconst takeProfit = Number(parts[6]);\n\nconst valid = /^[A-Z][A-Z0-9.\\-]{0,9}$/.test(ticker)\n  && Number.isInteger(conid) && conid > 0\n  && Number.isInteger(quantity) && quantity > 0\n  && stopLoss > 0 && stopLoss < entry && entry < takeProfit;\nif (!valid) {\n  return reject('⛔ Order-Daten im Button sind ungültig – es wurde keine Order gesendet.');\n}\n\n// Ein alter Vorschlag passt nicht mehr zum Markt.\nconst ageHours = (Date.now() / 1000 - Number(message.date || 0)) / 3600;\nif (!(ageHours >= 0 && ageHours <= cfg.orderMaxAgeHours)) {\n  return reject(`⌛ Der Vorschlag für ${ticker} ist älter als ${cfg.orderMaxAgeHours} Stunden – es wurde keine Order gesendet.`);\n}\n\n// Sicherheitsnetz: Paper-Konten beginnen bei IBKR mit \"D\" (z. B. DU1234567),\n// Echtgeldkonten nicht. Diese Pipeline sendet nur an Paper-Konten.\nconst account = String(cfg.ibkrAccountId || '').trim();\nif (!/^D[A-Z]?\\d+$/.test(account)) {\n  return reject('⛔ IBKR_ACCOUNT_ID ist kein Paper-Konto (Paper-Konten beginnen mit „D“, z. B. DU1234567) – es wurde keine Order gesendet.');\n}\n\n// Die cOID muss bei IBKR 24 Stunden lang eindeutig sein. Abgeleitet aus der\n// Telegram-Nachricht verhindert sie, dass ein doppelt zugestellter Klick\n// dieselbe Order zweimal anlegt.\nconst coid = `INS-${ticker}-${message.message_id}`;\nconst base = { acctId: account, conid, tif: 'GTC', quantity };\n\nreturn [{\n  json: {\n    ...result,\n    action: 'order',\n    account,\n    ticker,\n    quantity,\n    entry,\n    stopLoss,\n    takeProfit,\n    coid,\n    orderBody: {\n      orders: [\n        { ...base, cOID: coid, orderType: 'LMT', side: 'BUY', price: entry },\n        { ...base, parentId: coid, orderType: 'LMT', side: 'SELL', price: takeProfit },\n        { ...base, parentId: coid, orderType: 'STP', side: 'SELL', price: stopLoss },\n      ],\n    },\n  },\n}];"
+        "method": "POST",
+        "url": "={{ $('Config').first().json.cfg.journalBaseUrl }}/signals",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ accessionNo: $('Parse_Form4').first().json.accessionNo, telegramMessageId: $json.result?.message_id ?? null, form4: $('Parse_Form4').first().json, market: $('Build_Prompt').first().json.facts.market, history: $('Build_Prompt').first().json.facts.history, institutions: $('Build_Prompt').first().json.facts.institutions, derived: $('Build_Prompt').first().json.facts.derived, rating: $('Build_Message').first().json.signal, analysis: $('Build_Message').first().json.analysis, analysisNote: $('Build_Message').first().json.analysisNote, order: $('Build_Message').first().json.order }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "40319b35-f802-4e6c-ae4c-a96722360834",
+      "name": "Signal_Log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3700,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prüft einen Button-Klick aus Telegram und baut daraus die Bracket-Order.\n// Format der Button-Daten: o|TICKER|conid|Stück|Limit|Stop-Loss|Take-Profit\n// bzw. x|TICKER für \"Verwerfen\".\n\nconst input = $input.first().json;\nconst cfg = input.cfg;\nconst query = (input.body || {}).callback_query || {};\nconst message = query.message || {};\n\nconst result = {\n  action: 'invalid',\n  chatId: cfg.telegramChatId,\n  replyTo: message.message_id || null,\n  text: '',\n  // Für das Signal-Protokoll\n  ticker: null,\n  placed: false,\n  orderIds: [],\n};\nconst reject = (text) => [{ json: { ...result, text } }];\n\nif (String((query.from || {}).id) !== String(cfg.telegramChatId)) {\n  return reject('⛔ Button-Klick von einem fremden Telegram-Konto ignoriert.');\n}\n\nconst parts = String(query.data || '').split('|');\n\nif (parts[0] === 'x') {\n  return [{ json: { ...result, action: 'discard', ticker: parts[1] || null, text: `🗑 Vorschlag${parts[1] ? ` für ${parts[1]}` : ''} verworfen – es wurde keine Order gesendet.` } }];\n}\n\nif (parts[0] !== 'o' || parts.length !== 7) {\n  return reject('⛔ Unbekannte Button-Daten – es wurde keine Order gesendet.');\n}\n\nconst ticker = parts[1];\nconst conid = Number(parts[2]);\nconst quantity = Number(parts[3]);\nconst entry = Number(parts[4]);\nconst stopLoss = Number(parts[5]);\nconst takeProfit = Number(parts[6]);\n\nconst valid = /^[A-Z][A-Z0-9.\\-]{0,9}$/.test(ticker)\n  && Number.isInteger(conid) && conid > 0\n  && Number.isInteger(quantity) && quantity > 0\n  && stopLoss > 0 && stopLoss < entry && entry < takeProfit;\nif (!valid) {\n  return reject('⛔ Order-Daten im Button sind ungültig – es wurde keine Order gesendet.');\n}\nresult.ticker = ticker;\n\n// Ein alter Vorschlag passt nicht mehr zum Markt.\nconst ageHours = (Date.now() / 1000 - Number(message.date || 0)) / 3600;\nif (!(ageHours >= 0 && ageHours <= cfg.orderMaxAgeHours)) {\n  return reject(`⌛ Der Vorschlag für ${ticker} ist älter als ${cfg.orderMaxAgeHours} Stunden – es wurde keine Order gesendet.`);\n}\n\n// Sicherheitsnetz: Paper-Konten beginnen bei IBKR mit \"D\" (z. B. DU1234567),\n// Echtgeldkonten nicht. Diese Pipeline sendet nur an Paper-Konten.\nconst account = String(cfg.ibkrAccountId || '').trim();\nif (!/^D[A-Z]?\\d+$/.test(account)) {\n  return reject('⛔ IBKR_ACCOUNT_ID ist kein Paper-Konto (Paper-Konten beginnen mit „D“, z. B. DU1234567) – es wurde keine Order gesendet.');\n}\n\n// Die cOID muss bei IBKR 24 Stunden lang eindeutig sein. Abgeleitet aus der\n// Telegram-Nachricht verhindert sie, dass ein doppelt zugestellter Klick\n// dieselbe Order zweimal anlegt.\nconst coid = `INS-${ticker}-${message.message_id}`;\nconst base = { acctId: account, conid, tif: 'GTC', quantity };\n\nreturn [{\n  json: {\n    ...result,\n    action: 'order',\n    account,\n    ticker,\n    quantity,\n    entry,\n    stopLoss,\n    takeProfit,\n    coid,\n    orderBody: {\n      orders: [\n        { ...base, cOID: coid, orderType: 'LMT', side: 'BUY', price: entry },\n        { ...base, parentId: coid, orderType: 'LMT', side: 'SELL', price: takeProfit },\n        { ...base, parentId: coid, orderType: 'STP', side: 'SELL', price: stopLoss },\n      ],\n    },\n  },\n}];"
       },
       "id": "19f37a14-7279-4b5b-a971-2ace1a98ee38",
       "name": "Parse_Callback",
@@ -940,7 +969,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Fasst die Antwort von IBKR zu einer Telegram-Rückmeldung zusammen.\n\nconst request = $('Parse_Callback').first().json;\nconst items = $input.all().map((item) => item.json);\n\nconst esc = (value) => String(value === null || value === undefined ? '' : value)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\n// Rückfragen von IBKR (\"Order Reply Messages\"), die der Workflow bestätigt hat.\nconst questions = [];\nconst collect = (entries) => {\n  for (const entry of entries) {\n    if (entry.json && Array.isArray(entry.json.message) && !entry.json.order_id) {\n      questions.push(...entry.json.message.map((text) => String(text).replace(/\\s+/g, ' ').trim()));\n    }\n  }\n};\n// Ausgang 0 ausdrücklich angeben: Ohne Angabe nimmt n8n den Ausgang, der auf\n// kürzestem Weg zu diesem Node führt – das wäre hier der (leere) Fehlerausgang.\ntry { collect($('IBKR_Order').all(0, 0)); } catch (err) { /* Node lieferte nur einen Fehler */ }\nfor (let run = 0; run < 6; run += 1) {\n  try { collect($('IBKR_Reply').all(0, run)); } catch (err) { break; }\n}\n\nconst placed = items.filter((item) => item.order_id);\nconst lines = [];\n\nif (placed.length > 0) {\n  lines.push(`✅ <b>Bracket-Order für ${esc(request.ticker)} an das Paper-Konto ${esc(request.account)} übermittelt</b>`);\n  lines.push(`Kauf ${request.quantity} Stück, Limit ${request.entry} $ · Stop-Loss ${request.stopLoss} $ · Take-Profit ${request.takeProfit} $`);\n  lines.push(`Order-IDs: ${placed.map((item) => `${esc(item.order_id)} (${esc(item.order_status || 'unbekannt')})`).join(', ')}`);\n  if (placed.length < 3) lines.push('⚠️ IBKR hat weniger als drei Teilorders bestätigt – bitte in der IBKR-App prüfen.');\n} else {\n  const details = items.map((item) => {\n    const error = item.error;\n    if (typeof error === 'string') return error;\n    if (error && typeof error === 'object') return [error.message, error.description].filter(Boolean).join(' – ');\n    if (Array.isArray(item.message)) return `Unbeantwortete Rückfrage: ${item.message.join(' ')}`;\n    return JSON.stringify(item);\n  }).filter(Boolean);\n  lines.push(`❌ <b>Order für ${esc(request.ticker)} wurde nicht angenommen</b>`);\n  lines.push(esc(details.join(' | ').slice(0, 1200) || 'IBKR hat keine Begründung geliefert.'));\n  lines.push('Läuft das IBKR-Gateway und ist die Sitzung eingeloggt?');\n}\n\nif (questions.length > 0) {\n  lines.push('');\n  lines.push('<i>Von IBKR gemeldet und automatisch bestätigt:</i>');\n  for (const text of [...new Set(questions)].slice(0, 5)) lines.push(`• ${esc(text.slice(0, 300))}`);\n}\n\nreturn [{ json: { chatId: request.chatId, replyTo: request.replyTo, text: lines.join('\\n').slice(0, 4000) } }];"
+        "jsCode": "// Fasst die Antwort von IBKR zu einer Telegram-Rückmeldung zusammen.\n\nconst request = $('Parse_Callback').first().json;\nconst items = $input.all().map((item) => item.json);\n\nconst esc = (value) => String(value === null || value === undefined ? '' : value)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\n// Rückfragen von IBKR (\"Order Reply Messages\"), die der Workflow bestätigt hat.\nconst questions = [];\nconst collect = (entries) => {\n  for (const entry of entries) {\n    if (entry.json && Array.isArray(entry.json.message) && !entry.json.order_id) {\n      questions.push(...entry.json.message.map((text) => String(text).replace(/\\s+/g, ' ').trim()));\n    }\n  }\n};\n// Ausgang 0 ausdrücklich angeben: Ohne Angabe nimmt n8n den Ausgang, der auf\n// kürzestem Weg zu diesem Node führt – das wäre hier der (leere) Fehlerausgang.\ntry { collect($('IBKR_Order').all(0, 0)); } catch (err) { /* Node lieferte nur einen Fehler */ }\nfor (let run = 0; run < 6; run += 1) {\n  try { collect($('IBKR_Reply').all(0, run)); } catch (err) { break; }\n}\n\nconst placed = items.filter((item) => item.order_id);\nconst lines = [];\n\nif (placed.length > 0) {\n  lines.push(`✅ <b>Bracket-Order für ${esc(request.ticker)} an das Paper-Konto ${esc(request.account)} übermittelt</b>`);\n  lines.push(`Kauf ${request.quantity} Stück, Limit ${request.entry} $ · Stop-Loss ${request.stopLoss} $ · Take-Profit ${request.takeProfit} $`);\n  lines.push(`Order-IDs: ${placed.map((item) => `${esc(item.order_id)} (${esc(item.order_status || 'unbekannt')})`).join(', ')}`);\n  if (placed.length < 3) lines.push('⚠️ IBKR hat weniger als drei Teilorders bestätigt – bitte in der IBKR-App prüfen.');\n} else {\n  const details = items.map((item) => {\n    const error = item.error;\n    if (typeof error === 'string') return error;\n    if (error && typeof error === 'object') return [error.message, error.description].filter(Boolean).join(' – ');\n    if (Array.isArray(item.message)) return `Unbeantwortete Rückfrage: ${item.message.join(' ')}`;\n    return JSON.stringify(item);\n  }).filter(Boolean);\n  lines.push(`❌ <b>Order für ${esc(request.ticker)} wurde nicht angenommen</b>`);\n  lines.push(esc(details.join(' | ').slice(0, 1200) || 'IBKR hat keine Begründung geliefert.'));\n  lines.push('Läuft das IBKR-Gateway und ist die Sitzung eingeloggt?');\n}\n\nif (questions.length > 0) {\n  lines.push('');\n  lines.push('<i>Von IBKR gemeldet und automatisch bestätigt:</i>');\n  for (const text of [...new Set(questions)].slice(0, 5)) lines.push(`• ${esc(text.slice(0, 300))}`);\n}\n\nreturn [{\n  json: {\n    chatId: request.chatId,\n    replyTo: request.replyTo,\n    text: lines.join('\\n').slice(0, 4000),\n    // Für das Signal-Protokoll\n    action: 'order',\n    ticker: request.ticker,\n    placed: placed.length > 0,\n    orderIds: placed.map((item) => String(item.order_id)),\n  },\n}];"
       },
       "id": "9e1f43be-0378-4bb1-a951-68134c602613",
       "name": "Format_Result",
@@ -976,6 +1005,29 @@
           "name": "Telegram Bot"
         }
       },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.cfg.journalBaseUrl }}/events",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ telegramMessageId: $json.replyTo ?? null, action: $json.action, ticker: $json.ticker ?? null, placed: $json.placed ?? false, orderIds: $json.orderIds ?? [], detail: $json.text }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "9a4014b6-96e0-415d-a54a-de50bc596525",
+      "name": "Order_Log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        1380
+      ],
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000
@@ -1081,6 +1133,22 @@
       "position": [
         2260,
         100
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Signal-Protokoll\nJede Meldung (**Signal_Log**) und jede Entscheidung (**Order_Log**) wird im Dienst `journal` abgelegt (Ordner `data/`). Auswerten: `docker compose run --rm research report`.",
+        "width": 420,
+        "height": 160,
+        "color": 7
+      },
+      "id": "ccaa5fc4-9a3a-4ccd-a547-239c491da964",
+      "name": "Notiz Protokoll",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3440,
+        -80
       ]
     },
     {
@@ -1292,6 +1360,28 @@
         ]
       ]
     },
+    "Telegram": {
+      "main": [
+        [
+          {
+            "node": "Signal_Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram (ohne Order)": {
+      "main": [
+        [
+          {
+            "node": "Signal_Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "MarketData": {
       "main": [
         [
@@ -1390,6 +1480,11 @@
             "node": "Telegram (Order-Status)",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Order_Log",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -1453,6 +1548,11 @@
         [
           {
             "node": "Telegram (Order-Status)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Order_Log",
             "type": "main",
             "index": 0
           }

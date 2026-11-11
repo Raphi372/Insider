@@ -62,6 +62,14 @@ function handleSec(req, res, url, body) {
       const transactions = fixtures.history(byOwner[1]);
       return send(res, 200, { total: { value: transactions.length, relation: 'eq' }, transactions });
     }
+    // Backtest (research/src/sec-api.js): alle Käufe eines Zeitraums, seitenweise.
+    const byRange = query.match(/^documentType:4 AND nonDerivativeTable\.transactions\.coding\.code:P AND filedAt:\[(\S+) TO (\S+)\]$/);
+    if (byRange) {
+      const hits = Object.values(fixtures.FILINGS)
+        .filter((f) => f.filedAt.slice(0, 10) >= byRange[1] && f.filedAt.slice(0, 10) <= byRange[2]);
+      const offset = Number(body.from || 0);
+      return send(res, 200, { total: { value: hits.length, relation: 'eq' }, transactions: hits.slice(offset, offset + Number(body.size || 50)) });
+    }
     // Suche des Testlauf-Skripts (bridge/src/replay.js) nach dem jüngsten Kauf.
     if (query.startsWith('documentType:4 AND nonDerivativeTable.transactions.coding.code:P')) {
       const transactions = Object.values(fixtures.FILINGS);
@@ -92,6 +100,13 @@ function handleYahoo(req, res, url) {
   if (!cookie.includes('A3=e2e-cookie')) return send(res, 401, { finance: { error: { code: 'Unauthorized', description: 'Invalid Cookie' } } });
 
   if (url.pathname === '/yahoo/v1/test/getcrumb') return send(res, 200, 'CRUMB-123');
+
+  // Historische Tageskurse für Auswertung und Backtest.
+  const history = url.pathname.match(/^\/yahoo\/v8\/finance\/chart\/([^/]+)$/);
+  if (history) {
+    if (url.searchParams.get('crumb') !== 'CRUMB-123') return send(res, 401, { finance: { error: { code: 'Unauthorized', description: 'Invalid Crumb' } } });
+    return send(res, 200, fixtures.chart(decodeURIComponent(history[1])));
+  }
 
   const summary = url.pathname.match(/^\/yahoo\/v10\/finance\/quoteSummary\/([^/]+)$/);
   if (summary) {

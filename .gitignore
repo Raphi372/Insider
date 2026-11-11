@@ -5,3 +5,7 @@
 node_modules/
 npm-debug.log*
 .DS_Store
+
+# Signal-Protokoll, Auswertungen und Kurs-Cache – bleiben lokal
+data/*
+!data/.gitkeep
