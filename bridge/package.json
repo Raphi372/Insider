@@ -1,0 +1,17 @@
+{
+  "name": "insider-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Leitet sec-api.io-Stream-Filings und Telegram-Button-Klicks an lokale n8n-Webhooks weiter",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "8.22.2"
+  }
+}

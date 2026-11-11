@@ -1,0 +1,110 @@
+name: insider-pipeline
+
+# Gemeinsame Einstellungen für beide n8n-Container.
+x-n8n-environment: &n8n-environment
+  TZ: ${TZ:-Europe/Berlin}
+  GENERIC_TIMEZONE: ${TZ:-Europe/Berlin}
+  N8N_DIAGNOSTICS_ENABLED: "false"
+  N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+  N8N_PERSONALIZATION_ENABLED: "false"
+
+services:
+  # Läuft einmal vor n8n: legt Credentials an, importiert und veröffentlicht den Workflow.
+  n8n-init:
+    image: n8nio/n8n:2.47.3
+    entrypoint: ["/bin/sh", "/opt/insider/init.sh"]
+    restart: "no"
+    environment:
+      <<: *n8n-environment
+      SEC_API_KEY: ${SEC_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      BRIDGE_SECRET: ${BRIDGE_SECRET:-}
+      TELEGRAM_BASE_URL: ${INSIDER_TELEGRAM_BASE_URL:-https://api.telegram.org}
+      ANTHROPIC_BASE_URL: ${INSIDER_ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      WORKFLOW_IMPORT: ${WORKFLOW_IMPORT:-}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n:/opt/insider:ro
+
+  n8n:
+    image: n8nio/n8n:2.47.3
+    restart: unless-stopped
+    depends_on:
+      n8n-init:
+        condition: service_completed_successfully
+    ports:
+      # Nur vom eigenen Rechner erreichbar.
+      - "127.0.0.1:5678:5678"
+    environment:
+      <<: *n8n-environment
+      # Der Workflow liest seine Einstellungen über $env. Geheimnisse stehen
+      # hier bewusst nicht – die liegen verschlüsselt in den n8n-Credentials.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      # IPv4 genügt und funktioniert auch auf Hosts ohne IPv6.
+      N8N_LISTEN_ADDRESS: 0.0.0.0
+      # Ausführungsprotokolle nach 7 Tagen löschen (13F-Antworten sind groß).
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "168"
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      IBKR_ACCOUNT_ID: ${IBKR_ACCOUNT_ID:-}
+      IBKR_BASE_URL: ${IBKR_BASE_URL:-https://ibkr-gateway:5000}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-5-5}
+      MIN_SHARES: ${MIN_SHARES:-1000}
+      ORDER_BUDGET_USD: ${ORDER_BUDGET_USD:-5000}
+      ORDER_QUANTITY: ${ORDER_QUANTITY:-}
+      STOP_LOSS_PCT: ${STOP_LOSS_PCT:-8}
+      TAKE_PROFIT_PCT: ${TAKE_PROFIT_PCT:-15}
+      ORDER_BUTTON_MAX_AGE_HOURS: ${ORDER_BUTTON_MAX_AGE_HOURS:-24}
+      # Die INSIDER_*-Variablen leiten Aufrufe im End-to-End-Test auf den Mock um.
+      ANTHROPIC_BASE_URL: ${INSIDER_ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      SEC_API_BASE_URL: ${INSIDER_SEC_API_BASE_URL:-https://api.sec-api.io}
+      YAHOO_BASE_URL: ${INSIDER_YAHOO_BASE_URL:-https://query1.finance.yahoo.com}
+      YAHOO_COOKIE_URL: ${INSIDER_YAHOO_COOKIE_URL:-https://fc.yahoo.com}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Ersatz für den fehlenden WebSocket-Trigger: sec-api-Stream und
+  # Telegram-Button-Klicks -> n8n-Webhooks.
+  bridge:
+    build: ./bridge
+    restart: unless-stopped
+    depends_on:
+      n8n:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Europe/Berlin}
+      SEC_API_KEY: ${SEC_API_KEY:-}
+      SEC_STREAM_URL: ${INSIDER_SEC_STREAM_URL:-wss://stream.sec-api.io}
+      # Nur für den Testlauf "node src/replay.js" (sucht ein passendes Form 4).
+      SEC_API_BASE_URL: ${INSIDER_SEC_API_BASE_URL:-https://api.sec-api.io}
+      MIN_SHARES: ${MIN_SHARES:-1000}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_BASE_URL: ${INSIDER_TELEGRAM_BASE_URL:-https://api.telegram.org}
+      BRIDGE_SECRET: ${BRIDGE_SECRET:-}
+      N8N_WEBHOOK_BASE_URL: http://n8n:5678/webhook
+
+  # IBKR Client Portal Gateway mit automatischem Login (IBeam).
+  # Startet nur mit COMPOSE_PROFILES=ibkr (Standard in .env.example).
+  ibkr-gateway:
+    image: voyz/ibeam:0.6.0
+    profiles: ["ibkr"]
+    # Kein automatischer Neustart: Wiederholte Fehlanmeldungen sperren das Konto.
+    restart: "no"
+    environment:
+      IBEAM_ACCOUNT: ${IBEAM_ACCOUNT:-}
+      IBEAM_PASSWORD: ${IBEAM_PASSWORD:-}
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - ./ibkr/conf.yaml:/srv/inputs/conf.yaml:ro
+
+volumes:
+  n8n_data:
