@@ -119,6 +119,23 @@ test('Parse_Form4 liefert für Filings ohne Kauf null Lose – der Kauf-Filter v
   assert.equal(empty.purchase.lots, 0);
 });
 
+test('Parse_Form4 im Workflow und parseForm4 im Research-Paket liefern dasselbe', async () => {
+  const { parseForm4 } = require(path.join(ROOT, 'research/src/form4.js'));
+  const documents = [
+    form4([tx('M', 9000, 0, 30000), tx('P', 3000, 10.0, 23000), tx('P', 2000, 10.5, 25000), tx('S', 4000, 12, 21000)]),
+    form4([tx('P', 1000, 5, 11000, 'D'), tx('P', 4000, 5, 4000, 'I', 'By Trust')]),
+    form4([tx('P', 2000, 3.3333, 2000)], { footnotes: [{ id: 'F1', text: 'x'.repeat(500) }] }),
+    form4([tx('S', 4000, 12, 21000)]),
+    form4([tx('P', 2000, 3, 2000)], { issuer: { cik: '7', name: 'X', tradingSymbol: 'none' } }),
+    form4([tx('P', 2000, 3, 2000)], { reportingOwner: { cik: '9', name: 'Fund LP', relationship: { isTenPercentOwner: true, isOther: true, otherText: 'Member of group' } } }),
+    { accessionNo: 'leer' },
+  ];
+  for (const document of documents) {
+    const [fromWorkflow] = await run('Parse_Form4', { input: [{ transactions: [document] }] });
+    assert.deepEqual(fromWorkflow, parseForm4(document));
+  }
+});
+
 // ----------------------------------------------------------- Build_Prompt
 
 const SIGNAL = {
@@ -214,6 +231,8 @@ test('Build_Message berechnet die Bracket-Order aus Budget, Stop-Loss und Take-P
   assert.deepEqual(result.order, { ticker: 'ACME', conid: 111, quantity: 490, entry: 10.2, stopLoss: 9.38, takeProfit: 11.73 });
   assert.equal(result.callbackOrder, 'o|ACME|111|490|10.2|9.38|11.73');
   assert.equal(result.signal, 'MITTEL');
+  assert.deepEqual(result.analysis, VERDICT, 'die Antwort des Modells geht vollständig ins Signal-Protokoll');
+  assert.equal(result.analysisNote, null);
   assert.match(result.message, /🟡 <b>Insiderkauf ACME<\/b> – Signal: <b>MITTEL<\/b>/);
   assert.match(result.message, /⚠️ Datenlücken: Marktdaten/);
 });
@@ -263,6 +282,8 @@ test('Build_Message übersteht Ablehnung, abgeschnittene und unlesbare Modellant
   const garbage = await message({ llm: llmAnswer({ signal: 'KAUFEN', begruendung: 'x', pro: [], contra: [], datenluecken: [] }) });
   assert.match(garbage.message, /Die Antwort des Modells war nicht lesbar\./);
   assert.equal(garbage.signal, null);
+  assert.equal(garbage.analysis, null);
+  assert.equal(garbage.analysisNote, 'Die Antwort des Modells war nicht lesbar.');
 });
 
 test('Build_Message maskiert HTML in Fremdtexten', async () => {
@@ -292,6 +313,7 @@ test('Parse_Callback baut aus einem gültigen Klick eine Bracket-Order für das 
   const result = await callback(VALID);
   assert.equal(result.action, 'order');
   assert.equal(result.coid, 'INS-ACME-77');
+  assert.deepEqual([result.ticker, result.replyTo], ['ACME', 77]);
   const [parent, takeProfit, stopLoss] = result.orderBody.orders;
   assert.deepEqual(parent, { acctId: 'DU1234567', conid: 111, tif: 'GTC', quantity: 490, cOID: 'INS-ACME-77', orderType: 'LMT', side: 'BUY', price: 10.2 });
   assert.deepEqual([takeProfit.orderType, takeProfit.side, takeProfit.price, takeProfit.parentId], ['LMT', 'SELL', 11.73, 'INS-ACME-77']);
@@ -312,7 +334,9 @@ test('Parse_Callback sendet nie an ein Konto, das kein Paper-Konto ist', async (
 
 test('Parse_Callback lehnt fremde, veraltete und manipulierte Klicks ab', async () => {
   assert.match((await callback(VALID, { fromId: 999 })).text, /fremden Telegram-Konto/);
-  assert.match((await callback(VALID, { date: now() - 25 * 3600 })).text, /älter als 24 Stunden/);
+  const expired = await callback(VALID, { date: now() - 25 * 3600 });
+  assert.match(expired.text, /älter als 24 Stunden/);
+  assert.deepEqual([expired.action, expired.ticker, expired.placed], ['invalid', 'ACME', false]);
   assert.match((await callback(VALID, { date: 0 })).text, /älter als 24 Stunden/);
 
   const manipulated = [
@@ -336,6 +360,7 @@ test('Parse_Callback lehnt fremde, veraltete und manipulierte Klicks ab', async 
 test('Parse_Callback: "Verwerfen" sendet keine Order', async () => {
   const result = await callback('x|ACME');
   assert.equal(result.action, 'discard');
+  assert.deepEqual([result.ticker, result.placed, result.orderIds], ['ACME', false, []]);
   assert.match(result.text, /Vorschlag für ACME verworfen/);
 });
 
@@ -361,6 +386,10 @@ test('Format_Result meldet Erfolg samt bestätigter IBKR-Rückfragen', async () 
   assert.match(result.text, /Order-IDs: 1 \(PreSubmitted\), 2 \(PreSubmitted\), 3 \(PreSubmitted\)/);
   assert.match(result.text, /• Are you sure\? Really\?/);
   assert.ok(!result.text.includes('weniger als drei'));
+  assert.deepEqual(
+    [result.action, result.ticker, result.placed, result.orderIds, result.replyTo],
+    ['order', 'ACME', true, ['1', '2', '3'], 77],
+  );
 });
 
 test('Format_Result warnt bei unvollständiger Bracket-Order und meldet Ablehnungen', async () => {
@@ -372,6 +401,7 @@ test('Format_Result warnt bei unvollständiger Bracket-Order und meldet Ablehnun
   const [rejected] = await run('Format_Result', { input: [{ error: { message: '401 - not authenticated' } }], nodes });
   assert.match(rejected.text, /❌ <b>Order für ACME wurde nicht angenommen<\/b>/);
   assert.match(rejected.text, /401 - not authenticated/);
+  assert.deepEqual([rejected.action, rejected.placed, rejected.orderIds], ['order', false, []]);
 
   const [unanswered] = await run('Format_Result', { input: [question], nodes });
   assert.match(unanswered.text, /Unbeantwortete Rückfrage: Are you  sure\?/);
@@ -406,6 +436,14 @@ test('Workflow, Bridge und init.sh passen zusammen', () => {
   for (const id of credentialIds) assert.ok(init.includes(`"${id}"`), `init.sh legt die Credential-ID ${id} nicht an`);
   assert.ok(init.includes(`WORKFLOW_ID="${workflow.id}"`));
   assert.equal(workflow.settings.errorWorkflow, workflow.id);
+
+  // Der Workflow protokolliert auf den Wegen, die der Journal-Dienst anbietet.
+  const journal = fs.readFileSync(path.join(ROOT, 'research/src/journal.js'), 'utf8');
+  for (const [name, route] of [['Signal_Log', '/signals'], ['Order_Log', '/events']]) {
+    assert.ok(node(name).parameters.url.endsWith(route), `${name} zeigt nicht auf ${route}`);
+    assert.ok(journal.includes(`'POST ${route}'`), `Journal-Dienst kennt POST ${route} nicht`);
+    assert.equal(node(name).onError, undefined, `${name} darf Fehler nicht verschlucken`);
+  }
 
   // Im Workflow stehen keine Zugangsdaten.
   assert.doesNotMatch(JSON.stringify(workflow), /sk-ant-|token=|apiKey=|bot\d+:/i);

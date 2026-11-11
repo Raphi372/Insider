@@ -43,6 +43,13 @@ const waitForMessages = (count, timeoutMs) => waitFor(`${count} Telegram-Nachric
 
 const buttons = (message) => ((message.body.reply_markup || {}).inline_keyboard || []).flat();
 
+// Das Signal-Protokoll läuft als echter Dienst mit; es wird zwischen den Szenarien nicht geleert.
+const journal = (path) => fetch(`${process.env.JOURNAL_URL || 'http://journal:8090'}/${path}`).then((r) => r.json());
+const loggedSignal = (accessionNo) => waitFor(`Protokolleintrag ${accessionNo}`, async () =>
+  (await journal('signals')).find((entry) => entry.accessionNo === accessionNo));
+const loggedEvent = (messageId, action) => waitFor(`Ereignis ${action} zu Nachricht ${messageId}`, async () =>
+  (await journal('events')).find((event) => event.telegramMessageId === messageId && event.action === action));
+
 test.before(async () => {
   // Die Bridge verbindet sich erst, wenn n8n läuft und der Workflow veröffentlicht ist.
   await waitFor('Bridge mit dem Stream verbunden', async () => {
@@ -120,8 +127,20 @@ test('Insiderkauf: Analyse per Telegram, Order erst nach Klick auf den Button', 
   await sleep(3000);
   assert.equal((await telegram('sendMessage')).length, 1);
 
-  // -- Klick auf "Order senden"
-  const messageId = 777;
+  // -- Das Signal steht mit Kennzahlen, Einstufung und Order-Vorschlag im Protokoll
+  const entry = await loggedSignal('0001000000-26-000001');
+  assert.equal(entry.rating, 'STARK');
+  assert.deepEqual(entry.analysis, LLM_VERDICT);
+  assert.equal(entry.form4.ticker, 'ACME');
+  assert.equal(entry.form4.purchase.shares, 5000);
+  assert.equal(entry.form4.insiderCik, '2000001');
+  assert.equal(entry.market.price, 12);
+  assert.equal(entry.history.priorPurchases, 1);
+  assert.deepEqual(entry.order, { ticker: 'ACME', conid: 111, quantity: 490, entry: 10.2, stopLoss: 9.38, takeProfit: 11.73 });
+  assert.equal(typeof entry.telegramMessageId, 'number', 'über die Nachrichten-ID wird der spätere Klick zugeordnet');
+
+  // -- Klick auf "Order senden" unter genau dieser Nachricht
+  const messageId = entry.telegramMessageId;
   await click(orderButton.callback_data, messageId);
 
   const [, status] = await waitForMessages(2);
@@ -137,9 +156,9 @@ test('Insiderkauf: Analyse per Telegram, Order erst nach Klick auf den Button', 
   ]);
   assert.deepEqual(ibkr[1].body, {
     orders: [
-      { acctId: 'DU1234567', conid: 111, tif: 'GTC', quantity: 490, cOID: 'INS-ACME-777', orderType: 'LMT', side: 'BUY', price: 10.2 },
-      { acctId: 'DU1234567', conid: 111, tif: 'GTC', quantity: 490, parentId: 'INS-ACME-777', orderType: 'LMT', side: 'SELL', price: 11.73 },
-      { acctId: 'DU1234567', conid: 111, tif: 'GTC', quantity: 490, parentId: 'INS-ACME-777', orderType: 'STP', side: 'SELL', price: 9.38 },
+      { acctId: 'DU1234567', conid: 111, tif: 'GTC', quantity: 490, cOID: `INS-ACME-${messageId}`, orderType: 'LMT', side: 'BUY', price: 10.2 },
+      { acctId: 'DU1234567', conid: 111, tif: 'GTC', quantity: 490, parentId: `INS-ACME-${messageId}`, orderType: 'LMT', side: 'SELL', price: 11.73 },
+      { acctId: 'DU1234567', conid: 111, tif: 'GTC', quantity: 490, parentId: `INS-ACME-${messageId}`, orderType: 'STP', side: 'SELL', price: 9.38 },
     ],
   });
   assert.deepEqual(ibkr[2].body, { confirmed: true });
@@ -151,6 +170,10 @@ test('Insiderkauf: Analyse per Telegram, Order erst nach Klick auf den Button', 
   });
   assert.deepEqual(edit.body, { chat_id: CHAT_ID, message_id: messageId, reply_markup: { inline_keyboard: [] } });
   assert.equal((await telegram('answerCallbackQuery')).length, 1);
+
+  // -- Auch die Entscheidung steht im Protokoll
+  const event = await loggedEvent(messageId, 'order');
+  assert.deepEqual([event.ticker, event.placed, event.orderIds], ['ACME', true, ['1001', '1002', '1003']]);
 });
 
 test('Verkauf, Preis 0 und zu kleine Stückzahl lösen nichts aus', async () => {
@@ -181,6 +204,10 @@ test('Fallen Yahoo und Anthropic aus, kommt die Meldung trotzdem – ohne KI-Ein
   assert.match(text, /⚠️ KI-Analyse nicht verfügbar/);
   assert.equal(buttons(message)[0].callback_data, 'o|DOWN|333|490|10.2|9.38|11.73');
   assert.ok(!text.includes(LLM_VERDICT.begruendung));
+
+  const entry = await loggedSignal('0001000000-26-000006');
+  assert.deepEqual([entry.rating, entry.analysis, entry.market], [null, null, null], 'Lücken stehen als null im Protokoll');
+  assert.match(entry.analysisNote, /KI-Analyse nicht verfügbar/);
 });
 
 test('Kennt IBKR keinen Kontrakt, kommt die Analyse ohne Order-Button', async () => {
@@ -190,6 +217,7 @@ test('Kennt IBKR keinen Kontrakt, kommt die Analyse ohne Order-Button', async ()
   assert.match(message.body.text, /Insiderkauf NOIB/);
   assert.match(message.body.text, /Kein US-Kontrakt für NOIB bei IBKR gefunden – kein Order-Vorschlag\./);
   assert.equal(buttons(message).length, 0);
+  assert.equal((await loggedSignal('0001000000-26-000007')).order, null);
 });
 
 test('Noch nicht indexiertes Filing wird nach kurzer Wartezeit erneut abgefragt', async () => {
@@ -226,6 +254,10 @@ test('Fremde, veraltete und verworfene Klicks senden keine Order', async () => {
   assert.match(invalid.body.text, /⛔ Order-Daten im Button sind ungültig/);
 
   assert.equal((await requests('ibkr')).length, 0);
+
+  // Verworfene und abgelehnte Klicks stehen ebenfalls im Protokoll.
+  assert.deepEqual([(await loggedEvent(803, 'discard')).ticker, (await loggedEvent(803, 'discard')).placed], ['ACME', false]);
+  assert.equal((await loggedEvent(802, 'invalid')).placed, false);
 });
 
 test('Lehnt IBKR die Order ab, meldet Telegram den Grund', async () => {
@@ -234,6 +266,7 @@ test('Lehnt IBKR die Order ab, meldet Telegram den Grund', async () => {
   const [message] = await waitForMessages(1);
   assert.match(message.body.text, /❌ <b>Order für REJ wurde nicht angenommen<\/b>/);
   assert.match(message.body.text, /not authenticated|401|Authorization/i);
+  assert.deepEqual([(await loggedEvent(805, 'order')).placed, (await loggedEvent(805, 'order')).orderIds], [false, []]);
 });
 
 test('Bricht der Workflow ab, meldet der Error Trigger den Fehler per Telegram', async () => {

@@ -140,6 +140,42 @@ function quoteSummary(symbol) {
   };
 }
 
+/**
+ * Tageskurse im Format der Yahoo-Chart-API: Werktage von Juni 2026 bis März 2027.
+ * Aktien steigen täglich um 0,02 $, der Index (SPY) um 0,10 $.
+ */
+function chart(symbol) {
+  const timestamps = [];
+  const prices = [];
+  const day = new Date('2026-06-01T14:30:00Z'); // 9:30 Uhr New York
+  while (day.toISOString().slice(0, 10) <= '2027-03-31') {
+    if (day.getUTCDay() !== 0 && day.getUTCDay() !== 6) {
+      const i = prices.length;
+      timestamps.push(day.getTime() / 1000);
+      prices.push(symbol === 'SPY' ? 500 + 0.1 * i : 10 + 0.02 * i);
+    }
+    day.setUTCDate(day.getUTCDate() + 1);
+  }
+  return {
+    chart: {
+      result: [{
+        meta: { symbol, currency: 'USD', gmtoffset: -18000, exchangeTimezoneName: 'America/New_York', dataGranularity: '1d' },
+        timestamp: timestamps,
+        indicators: {
+          quote: [{
+            open: prices,
+            high: prices.map((p) => p * 1.01),
+            low: prices.map((p) => p * 0.99),
+            close: prices.map((p) => p * 1.001),
+            volume: prices.map(() => 200000),
+          }],
+        },
+      }],
+      error: null,
+    },
+  };
+}
+
 const LLM_VERDICT = {
   signal: 'STARK',
   begruendung: 'Die CFO stockt ihren Bestand um ein Viertel auf <ohne> Verkaufsdruck.',
@@ -148,4 +184,4 @@ const LLM_VERDICT = {
   datenluecken: [],
 };
 
-module.exports = { FILINGS, BROKEN_ACCESSION, streamFiling, history, institutionalHoldings, quoteSummary, LLM_VERDICT };
+module.exports = { FILINGS, BROKEN_ACCESSION, streamFiling, history, institutionalHoldings, quoteSummary, chart, LLM_VERDICT };

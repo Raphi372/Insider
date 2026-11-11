@@ -18,6 +18,7 @@ flowchart LR
   N --> C[Claude Haiku 5.5<br/>Einstufung + Begründung]
   N -- Nachricht mit Button --> TG
   N -- Bracket-Order nach Klick --> I[IBKR-Gateway<br/>Paper-Konto]
+  N -- Signal und Entscheidung --> J[Signal-Protokoll<br/>data/]
 ```
 
 1. Die **Bridge** hält die WebSocket-Verbindung zum sec-api.io-Stream, lässt nur Form 4 durch und übergibt jedes Filing einmal an n8n.
@@ -26,6 +27,7 @@ flowchart LR
 4. Alle Kennzahlen (Volumen, Bestandsveränderung, Erfolgsquote früherer Käufe, Short Interest …) berechnet der Workflow selbst. **Claude** bekommt sie fertig vorgelegt und liefert nur die Einstufung `SCHWACH`/`MITTEL`/`STARK` mit Begründung. In der Nachricht stehen deshalb keine Zahlen, die das Modell erfunden haben könnte.
 5. Du bekommst eine **Telegram-Nachricht** mit Analyse, Order-Vorschlag und zwei Buttons.
 6. Erst ein Tipp auf **„Order ans Paper-Konto senden“** schickt die Bracket-Order (Kauf-Limit zum Insiderpreis, Take-Profit, Stop-Loss) an IBKR. Das Ergebnis kommt als zweite Nachricht.
+7. Jedes Signal und jede Entscheidung landet im **Signal-Protokoll**. Damit lässt sich später prüfen, was die Signale tatsächlich wert waren (siehe [Signal-Protokoll und Backtest](#signal-protokoll-und-backtest)).
 
 Fällt eine Datenquelle aus (Yahoo, 13F, Historie, Claude), kommt die Meldung trotzdem und nennt die Lücke. Bricht der Workflow ganz ab, meldet ein Error Trigger den Fehler per Telegram.
 
@@ -93,12 +95,57 @@ Dieser Testlauf ruft die echten APIs auf. **Er ist der erste Lauf gegen die echt
 Diese Tests brauchen keine Zugangsdaten und rufen keine echten APIs auf.
 
 ```bash
-sh test/e2e/run.sh                          # End-to-End: echtes n8n, alle externen Dienste als Mock (ca. 3 Minuten)
-node --test test/unit/workflow.test.js      # Logik der Code-Nodes (Node.js >= 20)
+sh test/e2e/run.sh                          # End-to-End: echtes n8n, alle externen Dienste als Mock (ca. 4 Minuten)
+node --test test/unit/workflow.test.js      # Logik der Code-Nodes (Node.js >= 22)
 cd bridge && npm ci && npm test             # Bridge
+cd research && npm test                     # Protokoll, Auswertung, Backtest
 ```
 
-Der End-to-End-Test startet n8n mit genau dem Workflow aus diesem Repository und spielt zehn Szenarien durch, darunter die aus Teil 14 der ursprünglichen Anleitung: Kauf mit Analyse und Order nach Klick, Verkauf / Preis 0 / zu kleine Stückzahl (keine Meldung), Ausfall von Yahoo und Claude, unbekannter Kontrakt, verzögert indexiertes Filing, fremde und veraltete Klicks, von IBKR abgelehnte Order, der Fehlerpfad und Webhook-Aufrufe ohne Secret.
+Der End-to-End-Test startet n8n mit genau dem Workflow aus diesem Repository und spielt zehn Szenarien durch, darunter die aus Teil 14 der ursprünglichen Anleitung: Kauf mit Analyse und Order nach Klick, Verkauf / Preis 0 / zu kleine Stückzahl (keine Meldung), Ausfall von Yahoo und Claude, unbekannter Kontrakt, verzögert indexiertes Filing, fremde und veraltete Klicks, von IBKR abgelehnte Order, der Fehlerpfad und Webhook-Aufrufe ohne Secret. Dabei wird auch geprüft, dass Signale und Entscheidungen im Protokoll ankommen; anschließend laufen Auswertung und Backtest gegen die Mock-Daten.
+
+## Signal-Protokoll und Backtest
+
+Ob die Signale etwas taugen, zeigt erst die Messung. Dafür gibt es zwei Werkzeuge, die dieselbe Rechenlogik verwenden: das Protokoll für die Signale, die du ab jetzt bekommst, und den Backtest für die Vergangenheit.
+
+### Signal-Protokoll
+
+Der Dienst `journal` schreibt jede Telegram-Meldung mit allen Kennzahlen, der Einstufung des Modells und dem Order-Vorschlag nach `data/signals.jsonl`, und jede Entscheidung (Order gesendet, abgelehnt, verworfen) nach `data/events.jsonl`. Beide Dateien werden nur erweitert, nie überschrieben.
+
+```bash
+docker compose run --rm research report
+```
+
+Die Auswertung holt aktuelle Kurse und zeigt, wie sich die gemeldeten Aktien seit dem Signal gegenüber dem Markt (SPY) entwickelt haben – nach 5, 20 und 60 Handelstagen, insgesamt, je Einstufung (STARK/MITTEL/SCHWACH) und je Entscheidung. Gerechnet wird mit Kauf zum Eröffnungskurs am ersten Handelstag nach dem Filing. Das Ergebnis liegt zusätzlich in `data/signals-report.md` und als Excel-taugliche Tabelle in `data/signals-report.csv`.
+
+Aussagekräftig wird das erst mit der Zeit: Eine Haltedauer zählt erst, wenn sie abgelaufen ist, und Unterschiede zwischen den Einstufungen lassen sich erst ab etwa 100 Signalen je Gruppe von Zufall trennen.
+
+### Backtest
+
+```bash
+docker compose run --rm research backtest --from 2024-01-01 --to 2025-06-30
+```
+
+Der Backtest lädt alle Insiderkäufe des Zeitraums von sec-api.io, wendet den Kauf-Filter des Workflows an und rechnet mit historischen Tageskursen von Yahoo nach. Der Bericht (`data/backtest/report.md`, Einzelwerte in `data/backtest/trades.csv`) beantwortet drei Fragen:
+
+1. **Was ist das Signal wert?** Rendite und Überrendite gegenüber dem Markt nach 5, 20, 60 und 120 Handelstagen.
+2. **Welche Order-Regel ist besser?** Die jetzige Regel des Workflows (Limit zum Insiderpreis mit Stop-Loss und Take-Profit) im Vergleich zu einem Kauf zur Eröffnung mit und ohne Stop-Loss/Take-Profit – jeweils mit Ausführungsquote und Rendite nach Kosten.
+3. **Welche Signale sind besser?** Überrendite nach Rolle des Insiders, Kaufvolumen, Veränderung des Bestands, Cluster-Käufen, Routine- oder Gelegenheitskäufern, Handelbarkeit und Kursverlauf davor.
+
+Wichtige Optionen (alle mit `docker compose run --rm research help`):
+
+| Option | Standard | Bedeutung |
+|---|---|---|
+| `--from`, `--to` | letzte zwei Jahre | Zeitraum der Filings |
+| `--stop-loss`, `--take-profit` | Werte aus `.env` | zum Durchspielen anderer Abstände |
+| `--max-hold` | `60` | spätester Ausstieg in Handelstagen |
+| `--cost-bps` | `10` | Kosten je Kauf und je Verkauf in Basispunkten |
+| `--lookback-years` | `3` | Vorlauf, um Routinekäufer zu erkennen; `0` schaltet das ab |
+
+Der erste Lauf braucht Geduld und Kontingent: Mit dem Vorlauf werden mehrere Jahre Insiderkäufe und Kurse für alle betroffenen Titel geladen, und die Abrufe zählen gegen dein Kontingent bei sec-api.io. Fang deshalb klein an, etwa mit `--from 2025-01-01 --to 2025-03-31 --lookback-years 0`. Alles Geladene liegt danach in `data/cache/`; ein zweiter Lauf mit anderen Parametern rechnet nur noch.
+
+Was der Backtest nicht kann, steht am Ende jedes Berichts. Am wichtigsten: Unternehmen, die inzwischen von der Börse verschwunden sind, fehlen bei Yahoo – die Ergebnisse fallen dadurch zu gut aus. Und wer viele Merkmale durchprobiert, findet immer eine Gruppe, die zufällig gut aussieht; ein Merkmal verdient erst Vertrauen, wenn es sich in einem zweiten, getrennten Zeitraum bestätigt.
+
+Unter Linux muss der Ordner `data/` dem Benutzer mit der ID 1000 gehören, sonst meldet `journal` beim Start, dass er nicht schreiben kann: `sudo chown -R 1000:1000 data`.
 
 ## Einstellungen
 
@@ -149,6 +196,7 @@ Aus der Entwicklungsumgebung waren sec-api.io, Yahoo Finance, Telegram und IBKR 
 - **IBKR-Order:** Aufbau der Bracket-Order und Bestätigung der Rückfragen (`/iserver/reply`). Bitte die drei Orders nach dem ersten Klick in der App kontrollieren.
 - **IBeam-Login:** Die automatische Anmeldung ist für Paper-Zugangsdaten ohne Zwei-Faktor-Abfrage gedacht.
 - **Indexierung bei sec-api:** Der Workflow fragt ein neues Filing bis zu viermal im Abstand von 20 Sekunden ab. Dauert die Indexierung regelmäßig länger, bekommst du Fehlermeldungen „nicht in der Insider-Trading-API gefunden“.
+- **Auswertung und Backtest:** Historische Kurse kommen von Yahoos Chart-Schnittstelle (`/v8/finance/chart`), die Insiderkäufe aus einer Zeitraum-Abfrage (`filedAt:[… TO …]`) der Insider-Trading-API. Beides ist nur gegen Nachbildungen getestet. Prüfe beim ersten Backtest ein, zwei Zeilen aus `trades.csv` von Hand gegen ein Kursdiagramm.
 
 ## Fehlerbehebung
 
@@ -164,6 +212,7 @@ Aus der Entwicklungsumgebung waren sec-api.io, Yahoo Finance, Telegram und IBKR 
 | Telegram-Button reagiert nicht | Für den Bot ist ein Webhook gesetzt oder ein zweites Programm fragt denselben Bot ab; das Bridge-Log nennt den Grund |
 | Keine Telegram-Nachricht, auch kein Fehler | Dem Bot noch nicht `/start` geschrieben oder `TELEGRAM_CHAT_ID` falsch; in n8n unter „Executions“ steht der Fehler des Telegram-Nodes |
 | n8n startet nicht, `n8n-init` meldet fehlende Werte | In `.env` fehlt einer der genannten Schlüssel |
+| „FEHLER IM WORKFLOW … beim Node Signal_Log“ (oder Order_Log) | Der Dienst `journal` läuft nicht oder darf nicht nach `data/` schreiben: `docker compose logs journal`. Die Telegram-Meldung selbst kommt trotzdem an |
 
 Nützliche Befehle:
 
@@ -191,6 +240,8 @@ docker-compose.yml          alle Dienste
 n8n/init.sh                 legt Credentials an, importiert und veröffentlicht den Workflow
 n8n/workflows/              der n8n-Workflow (Quelle der Wahrheit)
 bridge/                     sec-api-Stream und Telegram-Klicks -> n8n-Webhooks, replay.js für Testläufe
+research/                   Signal-Protokoll (Dienst journal), Auswertung und Backtest
+data/                       Protokoll, Berichte und Cache (bleibt lokal, nicht im Git)
 ibkr/conf.yaml              Gateway-Konfiguration (Zugriff aus dem Docker-Netz)
 test/e2e/                   End-to-End-Test mit Mock aller externen Dienste
 test/unit/                  Tests der Workflow-Logik
