@@ -19,7 +19,7 @@ jobs:
       - name: Bridge
         working-directory: bridge
         run: npm ci && npm test
-      - name: Protokoll, Auswertung, Backtest
+      - name: Datenbank, Protokoll, Auswertung, Backtest
         working-directory: research
         run: npm test
 

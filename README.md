@@ -2,6 +2,8 @@
 
 Meldet Insiderkäufe aus SEC-Form-4-Filings in Echtzeit per Telegram, bewertet sie mit Claude und bereitet eine Bracket-Order für ein **Paper-Trading-Konto** bei Interactive Brokers vor. Die Order wird erst gesendet, wenn du in Telegram auf den Button tippst.
 
+Nebenbei speichert die Pipeline jede Insider-Meldung in einer lokalen Datenbank. Daraus erkennt sie, wenn mehrere Insider desselben Unternehmens kurz nacheinander kaufen (Cluster), und sie warnt dich, wenn ein Insider wieder verkauft, dessen Kauf du gefolgt bist.
+
 Alles läuft lokal in Docker: `docker compose up -d` startet n8n samt fertig importiertem Workflow, eine kleine Bridge und das IBKR-Gateway.
 
 > Kein Anlageberatungswerkzeug. Die Einstufung des Modells ist eine Einschätzung auf Basis weniger Kennzahlen, und das Projekt ist ausschließlich für Paper-Trading gedacht.
@@ -18,18 +20,21 @@ flowchart LR
   N --> C[Claude Haiku 5.5<br/>Einstufung + Begründung]
   N -- Nachricht mit Button --> TG
   N -- Bracket-Order nach Klick --> I[IBKR-Gateway<br/>Paper-Konto]
+  N -- jedes Form 4 --> D[Datenbank<br/>data/insider.db]
+  D -- "Cluster, Verkaufswarnung" --> N
   N -- Signal und Entscheidung --> J[Signal-Protokoll<br/>data/]
 ```
 
 1. Die **Bridge** hält die WebSocket-Verbindung zum sec-api.io-Stream, lässt nur Form 4 durch und übergibt jedes Filing einmal an n8n.
-2. Der **Workflow** lädt die Transaktionen des Filings und verwirft alles, was kein Offenmarktkauf ist (Transaction Code `P`, mehr als `MIN_SHARES` Aktien, Preis > 0).
-3. Für jeden Kauf holt er die bisherigen Transaktionen dieses Insiders, die jüngsten 13F-Meldungen institutioneller Halter und Marktdaten.
-4. Alle Kennzahlen (Volumen, Bestandsveränderung, Erfolgsquote früherer Käufe, Short Interest …) berechnet der Workflow selbst. **Claude** bekommt sie fertig vorgelegt und liefert nur die Einstufung `SCHWACH`/`MITTEL`/`STARK` mit Begründung. In der Nachricht stehen deshalb keine Zahlen, die das Modell erfunden haben könnte.
-5. Du bekommst eine **Telegram-Nachricht** mit Analyse, Order-Vorschlag und zwei Buttons.
-6. Erst ein Tipp auf **„Order ans Paper-Konto senden“** schickt die Bracket-Order (Kauf-Limit zum Insiderpreis, Take-Profit, Stop-Loss) an IBKR. Das Ergebnis kommt als zweite Nachricht.
-7. Jedes Signal und jede Entscheidung landet im **Signal-Protokoll**. Damit lässt sich später prüfen, was die Signale tatsächlich wert waren (siehe [Signal-Protokoll und Backtest](#signal-protokoll-und-backtest)).
+2. Der **Workflow** lädt die Transaktionen des Filings und legt sie in der **Datenbank** ab – jedes Form 4, auch Verkäufe und kleine Käufe. Verkauft dabei ein Insider, dessen Kauf du gefolgt bist, bekommst du eine **Verkaufswarnung**.
+3. Weiter geht es nur mit Offenmarktkäufen (Transaction Code `P`, Preis > 0) im Wert von mindestens `MIN_PURCHASE_VALUE_USD`, also 25.000 $, wenn du nichts anderes einstellst.
+4. Für jeden solchen Kauf holt er die bisherigen Transaktionen dieses Insiders, die jüngsten 13F-Meldungen institutioneller Halter, Marktdaten und aus der Datenbank die Käufe anderer Insider desselben Unternehmens (**Cluster**).
+5. Alle Kennzahlen (Volumen, Bestandsveränderung, Erfolgsquote früherer Käufe, Short Interest …) berechnet der Workflow selbst. **Claude** bekommt sie fertig vorgelegt und liefert nur die Einstufung `SCHWACH`/`MITTEL`/`STARK` mit Begründung. In der Nachricht stehen deshalb keine Zahlen, die das Modell erfunden haben könnte.
+6. Du bekommst eine **Telegram-Nachricht** mit Analyse, Order-Vorschlag und zwei Buttons.
+7. Erst ein Tipp auf **„Order ans Paper-Konto senden“** schickt die Bracket-Order (Kauf-Limit zum Insiderpreis, Take-Profit, Stop-Loss) an IBKR. Das Ergebnis kommt als zweite Nachricht.
+8. Jedes Signal und jede Entscheidung landet im **Signal-Protokoll**. Damit lässt sich später prüfen, was die Signale tatsächlich wert waren (siehe [Signal-Protokoll und Backtest](#signal-protokoll-und-backtest)).
 
-Fällt eine Datenquelle aus (Yahoo, 13F, Historie, Claude), kommt die Meldung trotzdem und nennt die Lücke. Bricht der Workflow ganz ab, meldet ein Error Trigger den Fehler per Telegram.
+Fällt eine Datenquelle aus (Yahoo, 13F, Historie, Claude, die Datenbank), kommt die Meldung trotzdem und nennt die Lücke. Bricht der Workflow ganz ab, meldet ein Error Trigger den Fehler per Telegram.
 
 ## Voraussetzungen
 
@@ -70,7 +75,27 @@ Fällt eine Datenquelle aus (Yahoo, 13F, Historie, Claude), kommt die Meldung tr
    docker compose logs ibkr-gateway  # erwartet: Sitzung "authenticated=True"
    ```
 
-6. **Testlauf mit einem echten Filing** (siehe nächster Abschnitt).
+6. **Datenbank vorfüllen** (empfohlen), damit Cluster-Käufe vom ersten Tag an erkannt werden:
+
+   ```bash
+   docker compose run --rm research backfill --days 30
+   ```
+
+7. **Testlauf mit einem echten Filing** (siehe nächster Abschnitt).
+
+### Aktualisieren
+
+Nach einem `git pull` übernimmst du eine neue Version so:
+
+```bash
+docker compose down
+docker compose run --rm -e WORKFLOW_IMPORT=force n8n-init
+docker compose up -d --build
+```
+
+Der zweite Befehl spielt den Workflow aus dem Repository ein, `--build` baut Bridge und Protokoll-Dienst neu. Wenige Sekunden nach dem Start arbeitet n8n mit der neuen Version. Deine Daten in `data/` und die n8n-Ausführungen bleiben erhalten. Eigene Änderungen am Workflow in der n8n-Oberfläche gehen dabei verloren – sichere sie vorher (siehe [Aufbau des Repositorys](#aufbau-des-repositorys)).
+
+Wer von einer Version vor der Datenbank kommt: `MIN_SHARES` in der `.env` hat keine Wirkung mehr. Der Filter richtet sich jetzt nach dem Kaufwert (`MIN_PURCHASE_VALUE_USD`, siehe [Einstellungen](#einstellungen)).
 
 ## Testen
 
@@ -95,13 +120,65 @@ Dieser Testlauf ruft die echten APIs auf. **Er ist der erste Lauf gegen die echt
 Diese Tests brauchen keine Zugangsdaten und rufen keine echten APIs auf.
 
 ```bash
-sh test/e2e/run.sh                          # End-to-End: echtes n8n, alle externen Dienste als Mock (ca. 4 Minuten)
-node --test test/unit/workflow.test.js      # Logik der Code-Nodes (Node.js >= 22)
+sh test/e2e/run.sh                          # End-to-End: echtes n8n, alle externen Dienste als Mock (ca. 5 Minuten)
+node --test test/unit/workflow.test.js      # Logik der Code-Nodes und Filter (Node.js >= 22.13)
 cd bridge && npm ci && npm test             # Bridge
-cd research && npm test                     # Protokoll, Auswertung, Backtest
+cd research && npm test                     # Datenbank, Protokoll, Auswertung, Backtest (Node.js >= 22.13)
 ```
 
-Der End-to-End-Test startet n8n mit genau dem Workflow aus diesem Repository und spielt zehn Szenarien durch, darunter die aus Teil 14 der ursprünglichen Anleitung: Kauf mit Analyse und Order nach Klick, Verkauf / Preis 0 / zu kleine Stückzahl (keine Meldung), Ausfall von Yahoo und Claude, unbekannter Kontrakt, verzögert indexiertes Filing, fremde und veraltete Klicks, von IBKR abgelehnte Order, der Fehlerpfad und Webhook-Aufrufe ohne Secret. Dabei wird auch geprüft, dass Signale und Entscheidungen im Protokoll ankommen; anschließend laufen Auswertung und Backtest gegen die Mock-Daten.
+Der End-to-End-Test startet n8n mit genau dem Workflow aus diesem Repository und spielt 14 Szenarien durch, darunter die aus Teil 14 der ursprünglichen Anleitung: Kauf mit Analyse und Order nach Klick, Cluster-Kauf eines zweiten Insiders, Verkaufswarnung (genau einmal, und nur nach gesendeter Order), Verkauf / Preis 0 / zu kleiner Kaufwert (keine Meldung, aber in der Datenbank), wenige teure Aktien, Ausfall von Yahoo und Claude, unbekannter Kontrakt, verzögert indexiertes Filing, fremde und veraltete Klicks, von IBKR abgelehnte Order, der Fehlerpfad und Webhook-Aufrufe ohne Secret. Danach wird der Protokoll-Dienst gestoppt, um einen Ausfall der Datenbank durchzuspielen, und zum Schluss laufen Nachladen, Auswertung und Backtest gegen die Mock-Daten.
+
+## Datenbank, Cluster und Verkaufswarnung
+
+Der Dienst `journal` speichert **jedes** Form 4, das über den Stream kommt, in `data/insider.db` (SQLite) – nicht nur die Käufe, die als Signal gemeldet werden, sondern auch Verkäufe, Zuteilungen, Optionsausübungen und Käufe unter dem Schwellenwert. Abgelegt wird jede einzelne Transaktion mit Aktien (Tabelle I des Formulars); Derivate wie Optionen (Tabelle II) bleiben außen vor.
+
+Darauf bauen zwei Funktionen auf:
+
+- **Cluster.** Bei jedem Signal prüft die Pipeline, ob in den `CLUSTER_DAYS` Tagen davor (Standard 14) andere Insider desselben Unternehmens am Markt gekauft haben – egal, wie groß deren Käufe waren. Die Telegram-Nachricht nennt sie in der Zeile „Cluster“, Claude bekommt sie für die Einstufung vorgelegt, und sie stehen im Signal-Protokoll. Ob Cluster-Käufe bei dir tatsächlich besser laufen als Einzelkäufe, zeigt die Auswertung (`research report`) in einem eigenen Abschnitt.
+
+  Verbundene Meldepflichtige – etwa ein Fonds und sein Verwalter – melden denselben Kauf mitunter in getrennten Formularen. Das sieht wie ein Cluster aus, ist aber nur ein Käufer. Stimmen Stückzahl und Kaufwert exakt mit dem gemeldeten Kauf überein, kennzeichnet die Nachricht das mit ⚠️, und Claude wird darauf hingewiesen. In Auswertung und Backtest zählen solche Fälle trotzdem als Cluster.
+- **Verkaufswarnung.** Verkauft ein Insider am Markt (Code `S`), dessen Kauf dir gemeldet wurde und zu dem du die Order gesendet hast, bekommst du eine Telegram-Nachricht mit Verkauf, Restbestand und dem früheren Kauf. Verkauft wird dabei nichts automatisch. Mit `SELL_ALERT_SCOPE=signals` kommt die Warnung nach jedem gemeldeten Kauf, auch ohne Order; `off` schaltet sie ab. Erwähnt das Filing einen vorab festgelegten Handelsplan (Rule 10b5-1), steht das dabei – solche Verkäufe sagen wenig aus.
+
+Die Warnung entsteht nur aus Meldungen, die über den Stream eintreffen, während die Pipeline läuft. Was in einer Pause gemeldet wurde, holt sie nicht nach.
+
+### Datenbank vorfüllen
+
+Direkt nach der Einrichtung ist die Datenbank leer, und ein Cluster lässt sich noch nicht erkennen. Die Nachricht sagt das offen („Datenbank reicht erst 3 Tage zurück“). Einmalig vorfüllen:
+
+```bash
+docker compose run --rm research backfill --days 30
+```
+
+Das lädt die Insiderkäufe der letzten 30 Tage von sec-api.io nach (höchstens 365). Die Abrufe – einer je 50 Käufe – zählen gegen dein Kontingent; am Ende steht, wie viele es waren. Nachgeladen werden nur Käufe, denn mehr braucht die Cluster-Erkennung nicht. Ein zweiter Lauf legt nichts doppelt an.
+
+### Stand ansehen und selbst auswerten
+
+```bash
+docker compose run --rm research stats
+```
+
+zeigt, wie viele Meldungen, Käufe und Verkäufe gespeichert sind und wie weit sie zurückreichen.
+
+Die Datei `data/insider.db` lässt sich mit jedem SQLite-Programm öffnen, zum Beispiel mit [DB Browser for SQLite](https://sqlitebrowser.org/). Arbeite am besten mit einer Kopie, damit das Programm der laufenden Pipeline nicht in die Quere kommt.
+
+| Tabelle | Inhalt |
+|---|---|
+| `filings` | eine Zeile je Form 4: Meldezeit, Ticker, Unternehmen, Insider, Rolle, Summe der Offenmarktkäufe und -verkäufe |
+| `transactions` | jede Transaktion: Datum, Code (`P` Kauf, `S` Verkauf, `A` Zuteilung, `M` Optionsausübung, `F` Steuereinbehalt, `G` Schenkung …), Stückzahl, Preis, Bestand danach |
+
+Ein Beispiel – bei welchen Unternehmen haben in den letzten 30 Tagen mindestens zwei Insider gekauft?
+
+```sql
+SELECT ticker, COUNT(DISTINCT insider_cik) AS insider, ROUND(SUM(purchase_value)) AS kaufwert_usd
+FROM filings
+WHERE purchase_value > 0 AND filed_date >= date('now', '-30 days')
+GROUP BY issuer_cik
+HAVING insider >= 2
+ORDER BY insider DESC, kaufwert_usd DESC
+LIMIT 20;
+```
+
+Die Datei wächst um knapp 1 KB je Meldung. Bei einigen hundert bis gut tausend Form 4 pro Handelstag sind das grob 100 bis 300 MB im Jahr.
 
 ## Signal-Protokoll und Backtest
 
@@ -109,13 +186,13 @@ Ob die Signale etwas taugen, zeigt erst die Messung. Dafür gibt es zwei Werkzeu
 
 ### Signal-Protokoll
 
-Der Dienst `journal` schreibt jede Telegram-Meldung mit allen Kennzahlen, der Einstufung des Modells und dem Order-Vorschlag nach `data/signals.jsonl`, und jede Entscheidung (Order gesendet, abgelehnt, verworfen) nach `data/events.jsonl`. Beide Dateien werden nur erweitert, nie überschrieben.
+Der Dienst `journal` schreibt jede Telegram-Meldung mit allen Kennzahlen, der Einstufung des Modells und dem Order-Vorschlag nach `data/signals.jsonl`, und jede Entscheidung (Order gesendet, abgelehnt, verworfen) sowie jede Verkaufswarnung nach `data/events.jsonl`. Beide Dateien werden nur erweitert, nie überschrieben.
 
 ```bash
 docker compose run --rm research report
 ```
 
-Die Auswertung holt aktuelle Kurse und zeigt, wie sich die gemeldeten Aktien seit dem Signal gegenüber dem Markt (SPY) entwickelt haben – nach 5, 20 und 60 Handelstagen, insgesamt, je Einstufung (STARK/MITTEL/SCHWACH) und je Entscheidung. Gerechnet wird mit Kauf zum Eröffnungskurs am ersten Handelstag nach dem Filing. Das Ergebnis liegt zusätzlich in `data/signals-report.md` und als Excel-taugliche Tabelle in `data/signals-report.csv`.
+Die Auswertung holt aktuelle Kurse und zeigt, wie sich die gemeldeten Aktien seit dem Signal gegenüber dem Markt (SPY) entwickelt haben – nach 5, 20 und 60 Handelstagen, insgesamt, je Einstufung (STARK/MITTEL/SCHWACH), je Entscheidung und getrennt nach Cluster- und Einzelkäufen. Gerechnet wird mit Kauf zum Eröffnungskurs am ersten Handelstag nach dem Filing. Das Ergebnis liegt zusätzlich in `data/signals-report.md` und als Excel-taugliche Tabelle in `data/signals-report.csv`.
 
 Aussagekräftig wird das erst mit der Zeit: Eine Haltedauer zählt erst, wenn sie abgelaufen ist, und Unterschiede zwischen den Einstufungen lassen sich erst ab etwa 100 Signalen je Gruppe von Zufall trennen.
 
@@ -136,10 +213,12 @@ Wichtige Optionen (alle mit `docker compose run --rm research help`):
 | Option | Standard | Bedeutung |
 |---|---|---|
 | `--from`, `--to` | letzte zwei Jahre | Zeitraum der Filings |
+| `--min-value` | Wert aus `.env` | Mindest-Kaufwert in US-Dollar, zum Durchspielen anderer Schwellen |
 | `--stop-loss`, `--take-profit` | Werte aus `.env` | zum Durchspielen anderer Abstände |
 | `--max-hold` | `60` | spätester Ausstieg in Handelstagen |
 | `--cost-bps` | `10` | Kosten je Kauf und je Verkauf in Basispunkten |
 | `--lookback-years` | `3` | Vorlauf, um Routinekäufer zu erkennen; `0` schaltet das ab |
+| `--cluster-days` | Wert aus `.env` | Zeitfenster für Cluster-Käufe in Tagen |
 
 Der erste Lauf braucht Geduld und Kontingent: Mit dem Vorlauf werden mehrere Jahre Insiderkäufe und Kurse für alle betroffenen Titel geladen, und die Abrufe zählen gegen dein Kontingent bei sec-api.io. Fang deshalb klein an, etwa mit `--from 2025-01-01 --to 2025-03-31 --lookback-years 0`. Alles Geladene liegt danach in `data/cache/`; ein zweiter Lauf mit anderen Parametern rechnet nur noch.
 
@@ -153,7 +232,10 @@ Alle Einstellungen stehen in `.env`. Nach einer Änderung: `docker compose up -d
 
 | Variable | Standard | Bedeutung |
 |---|---|---|
-| `MIN_SHARES` | `1000` | Nur Käufe mit mehr Aktien werden gemeldet |
+| `MIN_PURCHASE_VALUE_USD` | `25000` | Nur Käufe ab diesem Gesamtwert werden gemeldet (Aktien × Preis, alle Teilkäufe einer Meldung zusammen). Gespeichert wird jede Meldung |
+| `CLUSTER_DAYS` | `14` | So viele Tage zurück zählen Käufe anderer Insider desselben Unternehmens als Cluster |
+| `SELL_ALERT_SCOPE` | `orders` | Verkaufswarnung: `orders` nur nach gesendeter Order, `signals` nach jedem gemeldeten Kauf, `off` nie |
+| `SELL_ALERT_LOOKBACK_DAYS` | `365` | So viele Tage nach dem gemeldeten Kauf wird noch gewarnt |
 | `ORDER_BUDGET_USD` | `5000` | Ordergröße: Stückzahl = Budget / Limitpreis |
 | `ORDER_QUANTITY` | leer | Feste Stückzahl; hat Vorrang vor dem Budget |
 | `STOP_LOSS_PCT` | `8` | Abstand des Stop-Loss zum Limitpreis in Prozent |
@@ -162,7 +244,7 @@ Alle Einstellungen stehen in `.env`. Nach einer Änderung: `docker compose up -d
 | `ANTHROPIC_MODEL` | `claude-haiku-5-5` | Modell für die Einstufung |
 | `COMPOSE_PROFILES` | `ibkr` | Leer lassen, wenn du ein eigenes IBKR-Gateway betreibst |
 
-Den Prompt findest du in n8n im Node **Build_Prompt**, den Aufbau der Nachricht in **Build_Message**. Nach Änderungen in der Oberfläche auf „Publish“ klicken. `docker compose up -d` überschreibt einen vorhandenen Workflow nicht; mit `WORKFLOW_IMPORT=force docker compose up n8n-init` spielst du die Version aus dem Repository wieder ein.
+Den Prompt findest du in n8n im Node **Build_Prompt**, den Aufbau der Nachricht in **Build_Message**. Nach Änderungen in der Oberfläche auf „Publish“ klicken. `docker compose up -d` überschreibt einen vorhandenen Workflow nicht; die Version aus dem Repository spielst du wieder ein wie unter [Aktualisieren](#aktualisieren) beschrieben.
 
 ## Abweichungen von der ursprünglichen Anleitung
 
@@ -172,6 +254,7 @@ Die Anleitung, nach der dieses Projekt entstanden ist, hätte an mehreren Stelle
 |---|---|---|
 | „WebSocket Trigger“ in n8n | Den Node gibt es in n8n nicht | Bridge-Dienst (`bridge/`) leitet den Stream an einen n8n-Webhook weiter, mit Reconnect und Deduplizierung |
 | Filter auf `transactions[0].transactionCode` der Stream-Nachricht | Der Stream liefert nur Metadaten, keine Transaktionen | Transaktionen kommen aus der Insider-Trading-API; alle Kauf-Lose eines Filings werden summiert |
+| Schwelle „mehr als 1.000 Aktien“ | 1.000 Aktien können 500 $ oder 900.000 $ wert sein | Schwelle nach Kaufwert (`MIN_PURCHASE_VALUE_USD`) |
 | Historie über `ticker` und `reportingOwnerName` | Die Query-API liefert keine Transaktionsdaten | Insider-Trading-API, gesucht über die CIK von Emittent und Insider |
 | Yahoo `v7/finance/quote` mit User-Agent | Verlangt inzwischen Cookie und Crumb; Short Interest ist dort nicht enthalten | Cookie → Crumb → `quoteSummary`. Die Schnittstelle ist inoffiziell und kann sich jederzeit ändern |
 | `claude-3-5-haiku-20241022`, `max_tokens: 500`, Antwort aus `content[0].text` | Das Modell wurde im Februar 2026 abgeschaltet. Beim Nachfolger zählen Denk-Tokens mit und der Text steht nicht zwingend im ersten Block | `claude-haiku-5-5`, `max_tokens: 4000`, strukturierte JSON-Ausgabe, Auswertung nach Blocktyp |
@@ -196,6 +279,8 @@ Aus der Entwicklungsumgebung waren sec-api.io, Yahoo Finance, Telegram und IBKR 
 - **IBKR-Order:** Aufbau der Bracket-Order und Bestätigung der Rückfragen (`/iserver/reply`). Bitte die drei Orders nach dem ersten Klick in der App kontrollieren.
 - **IBeam-Login:** Die automatische Anmeldung ist für Paper-Zugangsdaten ohne Zwei-Faktor-Abfrage gedacht.
 - **Indexierung bei sec-api:** Der Workflow fragt ein neues Filing bis zu viermal im Abstand von 20 Sekunden ab. Dauert die Indexierung regelmäßig länger, bekommst du Fehlermeldungen „nicht in der Insider-Trading-API gefunden“.
+- **Datenbank unter Last:** Getestet sind einzelne Meldungen, nicht das Aufkommen eines echten Handelstags mit mehreren hundert bis über tausend Form 4. Ob alles ankommt, zeigt `docker compose run --rm research stats` nach dem ersten Tag.
+- **Cluster und Verkaufswarnung:** Beide ordnen Meldungen über die Kennnummern (CIK) von Unternehmen und Insider zu, wie sec-api.io sie liefert. Bei gemeinsamen Meldungen mehrerer Personen (etwa ein Fonds und dessen Verwalter) ist ungeprüft, welche Person sec-api.io nennt.
 - **Auswertung und Backtest:** Historische Kurse kommen von Yahoos Chart-Schnittstelle (`/v8/finance/chart`), die Insiderkäufe aus einer Zeitraum-Abfrage (`filedAt:[… TO …]`) der Insider-Trading-API. Beides ist nur gegen Nachbildungen getestet. Prüfe beim ersten Backtest ein, zwei Zeilen aus `trades.csv` von Hand gegen ein Kursdiagramm.
 
 ## Fehlerbehebung
@@ -213,6 +298,10 @@ Aus der Entwicklungsumgebung waren sec-api.io, Yahoo Finance, Telegram und IBKR 
 | Keine Telegram-Nachricht, auch kein Fehler | Dem Bot noch nicht `/start` geschrieben oder `TELEGRAM_CHAT_ID` falsch; in n8n unter „Executions“ steht der Fehler des Telegram-Nodes |
 | n8n startet nicht, `n8n-init` meldet fehlende Werte | In `.env` fehlt einer der genannten Schlüssel |
 | „FEHLER IM WORKFLOW … beim Node Signal_Log“ (oder Order_Log) | Der Dienst `journal` läuft nicht oder darf nicht nach `data/` schreiben: `docker compose logs journal`. Die Telegram-Meldung selbst kommt trotzdem an |
+| „Cluster: nicht geprüft – Datenbank nicht erreichbar“ | Dieselbe Ursache: Der Dienst `journal` läuft nicht. Solange er steht, wird nichts gespeichert und es gibt keine Verkaufswarnungen |
+| „Datenbank reicht erst … Tage zurück“ | Kein Fehler: Die Datenbank ist jünger als das Cluster-Zeitfenster. `docker compose run --rm research backfill --days 30` füllt sie vor |
+| Nach einem Update fehlt die Zeile „Cluster“ in der Nachricht | n8n arbeitet noch mit dem alten Workflow – siehe [Aktualisieren](#aktualisieren) |
+| Keine Verkaufswarnung, obwohl ein Insider verkauft hat | Gewarnt wird nur nach einer gesendeten Order (`SELL_ALERT_SCOPE`), nur für Offenmarktverkäufe (Code `S`) derselben Person und nur, wenn die Meldung bei laufender Pipeline eintraf |
 
 Nützliche Befehle:
 
@@ -240,8 +329,8 @@ docker-compose.yml          alle Dienste
 n8n/init.sh                 legt Credentials an, importiert und veröffentlicht den Workflow
 n8n/workflows/              der n8n-Workflow (Quelle der Wahrheit)
 bridge/                     sec-api-Stream und Telegram-Klicks -> n8n-Webhooks, replay.js für Testläufe
-research/                   Signal-Protokoll (Dienst journal), Auswertung und Backtest
-data/                       Protokoll, Berichte und Cache (bleibt lokal, nicht im Git)
+research/                   Datenbank und Signal-Protokoll (Dienst journal), Nachladen, Auswertung und Backtest
+data/                       Datenbank, Protokoll, Berichte und Cache (bleibt lokal, nicht im Git)
 ibkr/conf.yaml              Gateway-Konfiguration (Zugriff aus dem Docker-Netz)
 test/e2e/                   End-to-End-Test mit Mock aller externen Dienste
 test/unit/                  Tests der Workflow-Logik

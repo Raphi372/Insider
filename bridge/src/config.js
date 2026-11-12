@@ -26,7 +26,7 @@ function loadConfig(env = process.env) {
     secApiKey: env.SEC_API_KEY.trim(),
     secStreamUrl: trimSlashes(env.SEC_STREAM_URL || 'wss://stream.sec-api.io'),
     secApiBaseUrl: trimSlashes(env.SEC_API_BASE_URL || 'https://api.sec-api.io'),
-    minShares: Number(env.MIN_SHARES || 1000),
+    minPurchaseValueUsd: Number(env.MIN_PURCHASE_VALUE_USD || 25000),
     formTypes,
     n8nWebhookBaseUrl: trimSlashes(env.N8N_WEBHOOK_BASE_URL || 'http://n8n:5678/webhook'),
     bridgeSecret: env.BRIDGE_SECRET.trim(),

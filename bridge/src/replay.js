@@ -17,10 +17,10 @@ const num = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
 
 /**
  * Wählt aus Antworten der Insider-Trading-API das erste Filing, das der
- * Workflow als Signal melden würde: Offenmarktkauf (Code P) mit mehr als
- * `minShares` Aktien, Preis > 0 und einem Ticker.
+ * Workflow als Signal melden würde: Offenmarktkauf (Code P) im Wert von
+ * mindestens `minValue` Dollar, Preis > 0 und einem Ticker.
  */
-function pickReplayCandidate(filings, minShares) {
+function pickReplayCandidate(filings, minValue) {
   for (const filing of filings || []) {
     const ticker = String((filing.issuer || {}).tradingSymbol || '').trim().toUpperCase();
     if (!/^[A-Z][A-Z0-9.\-]{0,9}$/.test(ticker) || ['NONE', 'NA', 'N.A'].includes(ticker)) continue;
@@ -30,7 +30,7 @@ function pickReplayCandidate(filings, minShares) {
     const shares = purchases.reduce((sum, t) => sum + num((t.amounts || {}).shares), 0);
     const value = purchases.reduce((sum, t) => sum + num((t.amounts || {}).shares) * num((t.amounts || {}).pricePerShare), 0);
 
-    if (shares > minShares && value > 0) return filing;
+    if (shares > 0 && value > 0 && value >= minValue) return filing;
   }
   return null;
 }
@@ -49,7 +49,7 @@ async function findLatestPurchase(config, fetchImpl = fetch) {
   });
   if (!response.ok) throw new Error(`sec-api.io antwortet mit HTTP ${response.status} – SEC_API_KEY prüfen`);
   const data = await response.json();
-  return pickReplayCandidate(data.transactions, config.minShares);
+  return pickReplayCandidate(data.transactions, config.minPurchaseValueUsd);
 }
 
 async function main() {
@@ -59,7 +59,7 @@ async function main() {
 
   if (!accessionNo) {
     const filing = await findLatestPurchase(config);
-    if (!filing) throw new Error('Unter den letzten 50 Insiderkäufen passt keiner zum Filter – MIN_SHARES senken oder eine Accession Number angeben');
+    if (!filing) throw new Error('Unter den letzten 50 Insiderkäufen passt keiner zum Filter – MIN_PURCHASE_VALUE_USD senken oder eine Accession Number angeben');
     accessionNo = filing.accessionNo;
     label = `${accessionNo} (${filing.issuer.tradingSymbol}, ${filing.reportingOwner && filing.reportingOwner.name}, gemeldet ${filing.filedAt})`;
   }

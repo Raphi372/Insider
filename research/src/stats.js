@@ -30,7 +30,8 @@ function summarize(values) {
     mean: mean(xs),
     median: median(xs),
     hitRate: xs.length ? xs.filter((x) => x > 0).length / xs.length : null,
-    tStat: sd ? mean(xs) / (sd / Math.sqrt(xs.length)) : null,
+    // Ohne Streuung (lauter gleiche Werte) wäre der t-Wert eine Division durch Rundungsreste.
+    tStat: sd > 1e-9 ? mean(xs) / (sd / Math.sqrt(xs.length)) : null,
   };
 }
 

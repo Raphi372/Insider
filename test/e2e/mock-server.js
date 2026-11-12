@@ -59,7 +59,7 @@ function handleSec(req, res, url, body) {
     }
     const byOwner = query.match(/^issuer\.cik:(\d+) AND reportingOwner\.cik:(\d+)$/);
     if (byOwner) {
-      const transactions = fixtures.history(byOwner[1]);
+      const transactions = fixtures.history(byOwner[1], byOwner[2]);
       return send(res, 200, { total: { value: transactions.length, relation: 'eq' }, transactions });
     }
     // Backtest (research/src/sec-api.js): alle Käufe eines Zeitraums, seitenweise.
@@ -176,7 +176,7 @@ function handleIbkr(req, res, url, body) {
 
   if (path === '/v1/api/trsrv/stocks') {
     const symbol = url.searchParams.get('symbols');
-    const known = { ACME: 111, LATE: 222, DOWN: 333, REJ: 444 };
+    const known = { ACME: 111, LATE: 222, DOWN: 333, REJ: 444, PRCY: 555 };
     const listings = known[symbol]
       ? [{ name: `${symbol} CORP`, chineseName: null, assetClass: 'STK', contracts: [
         { conid: 9000 + known[symbol], exchange: 'MEXI', isUS: false },
