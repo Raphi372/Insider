@@ -299,23 +299,24 @@ const tx = (code, shares, price, acquired = 'A') => ({
 test('pickReplayCandidate wählt das erste Filing, das den Kauf-Filter passieren würde', () => {
   const filings = [
     replayFiling('A', 'SELL', [tx('S', 5000, 10, 'D')]),
-    replayFiling('B', 'TINY', [tx('P', 500, 10)]),
-    replayFiling('C', 'ZERO', [tx('P', 5000, 0)]),
+    replayFiling('B', 'TINY', [tx('P', 5000, 2)]), // viele Aktien, aber nur 10.000 $
+    replayFiling('C', 'ZERO', [tx('P', 50000, 0)]),
     replayFiling('D', 'NONE', [tx('P', 5000, 10)]),
-    replayFiling('E', 'GOOD', [tx('P', 600, 10), tx('P', 600, 11)]),
+    replayFiling('E', 'GOOD', [tx('P', 150, 90), tx('P', 150, 100)]), // wenige Aktien, zusammen 28.500 $
     replayFiling('F', 'ALSO', [tx('P', 9000, 10)]),
   ];
-  assert.equal(pickReplayCandidate(filings, 1000).accessionNo, 'E');
-  assert.equal(pickReplayCandidate(filings.slice(0, 4), 1000), null);
-  assert.equal(pickReplayCandidate(undefined, 1000), null);
+  assert.equal(pickReplayCandidate(filings, 25000).accessionNo, 'E');
+  assert.equal(pickReplayCandidate(filings.slice(0, 4), 25000), null);
+  assert.equal(pickReplayCandidate(filings, 0).accessionNo, 'B', 'ohne Wertschwelle zählt jeder Kauf mit Preis');
+  assert.equal(pickReplayCandidate(undefined, 25000), null);
 });
 
 test('findLatestPurchase fragt die Insider-Trading-API nach Käufen und meldet HTTP-Fehler', async () => {
   const calls = [];
-  const config = { secApiBaseUrl: 'https://sec.test', secApiKey: 'k y', minShares: 1000 };
+  const config = { secApiBaseUrl: 'https://sec.test', secApiKey: 'k y', minPurchaseValueUsd: 25000 };
   const ok = async (url, init) => {
     calls.push({ url, body: JSON.parse(init.body) });
-    return { ok: true, status: 200, json: async () => ({ transactions: [replayFiling('E', 'GOOD', [tx('P', 2000, 5)])] }) };
+    return { ok: true, status: 200, json: async () => ({ transactions: [replayFiling('E', 'GOOD', [tx('P', 2000, 50)])] }) };
   };
 
   assert.equal((await findLatestPurchase(config, ok)).accessionNo, 'E');

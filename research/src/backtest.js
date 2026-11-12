@@ -58,7 +58,8 @@ function buildReport({ params, universe, candidates, evaluated, excluded }) {
 
   lines.push('# Backtest Insiderkäufe', '');
   lines.push(`Filings vom ${params.from} bis ${params.to}, erstellt am ${today()}.`);
-  lines.push(`Filter wie im Workflow: Offenmarktkauf (Code P), mehr als ${count(params.minShares)} Aktien, Preis über 0.`);
+  const sharesNote = params.minShares > 0 ? `, mehr als ${count(params.minShares)} Aktien` : '';
+  lines.push(`Filter wie im Workflow: Offenmarktkauf (Code P), Kaufwert ab ${count(params.minValue)} $${sharesNote}, Preis über 0.`);
   lines.push(`Vergleichsindex: ${params.benchmark}. Überrendite = Rendite der Aktie minus Rendite des Index im selben Zeitraum.`, '');
 
   lines.push('## Datengrundlage', '');
@@ -151,7 +152,7 @@ async function runBacktest(params, deps) {
   log(`Lade Insiderkäufe von ${dataStart} bis ${params.to} ...`);
   const universe = await deps.secApi.fetchPurchases(dataStart, params.to);
   const inPeriod = universe.filter((signal) => signal.filedAt.slice(0, 10) >= params.from);
-  const candidates = inPeriod.filter((signal) => passesFilter(signal, params.minShares));
+  const candidates = inPeriod.filter((signal) => passesFilter(signal, { minValue: params.minValue, minShares: params.minShares }));
   log(`${count(universe.length)} Käufe geladen, ${count(candidates.length)} Signale im Zeitraum über dem Filter.`);
 
   const tickers = [...new Set(candidates.map((signal) => signal.ticker))];

@@ -22,6 +22,7 @@ test('summarize liefert Mittelwert, Median, Trefferquote und t-Wert', () => {
   close(stats.tStat, 0.0625 / (Math.sqrt(((0.0375 ** 2) + (0.1125 ** 2) + (0.1375 ** 2) + (0.0625 ** 2)) / 3) / 2));
   assert.deepEqual(summarize([]), { n: 0, mean: null, median: null, hitRate: null, tStat: null });
   assert.equal(summarize([0.1]).tStat, null);
+  assert.equal(summarize([0.07, 0.07 + 1e-17, 0.07]).tStat, null, 'lauter gleiche Werte: kein t-Wert statt einer Riesenzahl');
 });
 
 test('Formatierung: Prozent, Tabelle und Excel-CSV', () => {

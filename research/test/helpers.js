@@ -50,6 +50,30 @@ function signal(overrides = {}) {
   };
 }
 
+/** Eine Zeile der Tabelle I im Format der sec-api Insider-Trading-API. */
+function rawTx(code, shares, price, after, { date = '2024-03-01', ownership = 'D' } = {}) {
+  return {
+    securityTitle: 'Common Stock',
+    transactionDate: date,
+    coding: { code },
+    amounts: { shares, pricePerShare: price, acquiredDisposedCode: code === 'S' || code === 'F' ? 'D' : 'A' },
+    postTransactionAmounts: { sharesOwnedFollowingTransaction: after },
+    ownershipNature: { directOrIndirectOwnership: ownership },
+  };
+}
+
+/** Ein Form-4-Dokument, wie es die sec-api Insider-Trading-API liefert. */
+function rawForm4({ accessionNo, filedAt = '2024-03-04T17:30:00-05:00', issuerCik = '1', ticker = 'ACME', insiderCik = '100', insiderName = 'Doe Jane', relationship = { isOfficer: true, officerTitle: 'Chief Financial Officer' }, transactions = [], footnotes = [] }) {
+  return {
+    accessionNo,
+    filedAt,
+    issuer: { cik: issuerCik, name: `${ticker} Corp`, tradingSymbol: ticker },
+    reportingOwner: { cik: insiderCik, name: insiderName, relationship },
+    nonDerivativeTable: { transactions },
+    footnotes,
+  };
+}
+
 const jsonResponse = (status, body, headers = {}) => ({
   ok: status >= 200 && status < 300,
   status,
@@ -59,4 +83,4 @@ const jsonResponse = (status, body, headers = {}) => ({
   arrayBuffer: async () => new ArrayBuffer(0),
 });
 
-module.exports = { makeBars, bar, signal, jsonResponse };
+module.exports = { makeBars, bar, signal, rawTx, rawForm4, jsonResponse };

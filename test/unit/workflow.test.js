@@ -38,7 +38,7 @@ async function run(name, { input = [{}], nodes = {} } = {}) {
 }
 
 const CFG = {
-  minShares: 1000, orderBudgetUsd: 5000, orderQuantity: 0, stopLossPct: 8, takeProfitPct: 15,
+  minPurchaseValueUsd: 25000, orderBudgetUsd: 5000, orderQuantity: 0, stopLossPct: 8, takeProfitPct: 15,
   orderMaxAgeHours: 24, telegramChatId: '4242', ibkrAccountId: 'DU1234567', model: 'claude-haiku-5-5',
 };
 const config = (overrides = {}) => [{ cfg: { ...CFG, ...overrides } }];
@@ -136,11 +136,112 @@ test('Parse_Form4 im Workflow und parseForm4 im Research-Paket liefern dasselbe'
   }
 });
 
+// ------------------------------------------------- Kauf-Filter (IF-Nodes)
+
+/**
+ * Wertet die Bedingungen eines IF-Nodes so aus, wie sie in der Workflow-Datei
+ * stehen (nur die dort verwendeten Operatoren). `json` ist das eingehende Item.
+ */
+function passesIf(name, { json = {}, nodes = {} } = {}) {
+  const $ = (nodeName) => {
+    if (!(nodeName in nodes)) throw new Error(`Node "${nodeName}" wurde nicht ausgeführt`);
+    return { first: () => ({ json: nodes[nodeName][0] }) };
+  };
+  const evaluate = (value) => {
+    if (typeof value !== 'string' || !value.startsWith('=')) return value;
+    const expression = /^=\{\{(.*)\}\}$/s.exec(value);
+    assert.ok(expression, `Ausdruck nicht auswertbar: ${value}`);
+    return new Function('$', '$json', `return (${expression[1]});`)($, json);
+  };
+  const { conditions, combinator } = node(name).parameters.conditions;
+  assert.equal(combinator, 'and');
+  return conditions.every((condition) => {
+    const left = evaluate(condition.leftValue);
+    const right = evaluate(condition.rightValue);
+    const { type, operation } = condition.operator;
+    if (type === 'number') assert.equal(typeof left, 'number', `${condition.leftValue} muss eine Zahl liefern (strikte Typprüfung)`);
+    if (operation === 'gt') return left > right;
+    if (operation === 'gte') return left >= right;
+    if (operation === 'true') return left === true;
+    throw new Error(`Operator "${operation}" kennt dieser Test nicht`);
+  });
+}
+
+const passesPurchaseFilter = async (transactions, { cfg, overrides } = {}) => {
+  const [signal] = await run('Parse_Form4', { input: [{ transactions: [form4(transactions, overrides)] }] });
+  return passesIf('Kauf-Filter', { nodes: { Parse_Form4: [signal], Config: config(cfg) } });
+};
+
+test('Kauf-Filter entscheidet nach Kaufwert statt nach Stückzahl', async () => {
+  assert.equal(await passesPurchaseFilter([tx('P', 300, 900, 300)]), true, '300 Aktien zu 900 $ sind 270.000 $');
+  assert.equal(await passesPurchaseFilter([tx('P', 5000, 2, 5000)]), false, '5.000 Aktien zu 2 $ sind nur 10.000 $');
+  assert.equal(await passesPurchaseFilter([tx('P', 2500, 10, 2500)]), true, 'genau die Schwelle zählt mit');
+  assert.equal(await passesPurchaseFilter([tx('P', 2499, 10, 2499)]), false);
+  assert.equal(await passesPurchaseFilter([tx('P', 1500, 10, 1500), tx('P', 1000, 10, 2500)]), true, 'mehrere Teilkäufe einer Meldung zählen zusammen');
+  assert.equal(await passesPurchaseFilter([tx('P', 2000, 10, 2000)], { cfg: { minPurchaseValueUsd: 20000 } }), true, 'Schwelle aus MIN_PURCHASE_VALUE_USD');
+});
+
+test('Kauf-Filter lässt Verkäufe, Zuteilungen, Preis 0 und Meldungen ohne Ticker nie durch', async () => {
+  const open = { cfg: { minPurchaseValueUsd: 0 } }; // selbst ohne Wertschwelle
+  assert.equal(await passesPurchaseFilter([tx('S', 40000, 12, 21000)], open), false);
+  assert.equal(await passesPurchaseFilter([tx('A', 40000, 12, 61000), tx('M', 9000, 5, 70000)], open), false);
+  assert.equal(await passesPurchaseFilter([tx('P', 40000, 0, 40000)], open), false);
+  assert.equal(await passesPurchaseFilter([tx('P', 40000, 12, 40000)], { ...open, overrides: { issuer: { cik: '7', name: 'X', tradingSymbol: 'NONE' } } }), false);
+  assert.equal(await passesPurchaseFilter([tx('P', 40000, 12, 40000)], open), true);
+});
+
+test('Verkaufswarnung? folgt allein der Antwort der Datenbank', () => {
+  assert.equal(passesIf('Verkaufswarnung?', { json: { stored: true, sellAlert: { ticker: 'ACME' } } }), true);
+  assert.equal(passesIf('Verkaufswarnung?', { json: { stored: true, cluster: null, sellAlert: null } }), false);
+  assert.equal(passesIf('Verkaufswarnung?', { json: { error: { message: 'ECONNREFUSED' } } }), false, 'Datenbank nicht erreichbar: keine Warnung, aber die Pipeline läuft weiter');
+});
+
+// ------------------------------------------------------- Build_Sell_Alert
+
+const SELL_ALERT = {
+  accessionNo: '0001000000-26-000009', filedAt: '2026-11-12T16:40:00-05:00', ticker: 'ACME', issuerName: 'ACME Corp',
+  insiderName: 'Doe Jane', role: 'Officer (CEO), Director', mentions10b51: false, link: 'https://www.sec.gov/y',
+  sale: { lots: 1, shares: 6000, value: 90000, avgPrice: 15, firstDate: '2026-11-11', lastDate: '2026-11-11', sharesOwnedBefore: 25000, sharesOwnedAfter: 19000, holdingsDecreasePct: 24 },
+  followed: { accessionNo: '0001000000-26-000001', filedAt: '2026-11-10T16:31:02-05:00', shares: 5000, value: 51000, avgPrice: 10.2, rating: 'STARK', orderSent: true },
+};
+const sellAlert = (overrides = {}) => run('Build_Sell_Alert', {
+  input: [{ stored: true, isNew: true, cluster: null, sellAlert: { ...SELL_ALERT, ...overrides } }],
+  nodes: { Config: config() },
+}).then(([json]) => json);
+
+test('Build_Sell_Alert nennt Verkauf, Restbestand und den Kauf, dem du gefolgt bist', async () => {
+  const result = await sellAlert();
+  assert.deepEqual([result.chatId, result.ticker, result.accessionNo], ['4242', 'ACME', '0001000000-26-000009']);
+  assert.match(result.text, /^🔻 <b>Insiderverkauf ACME<\/b> – du bist dem Kauf dieses Insiders gefolgt\nACME Corp\n/);
+  assert.match(result.text, /<b>Insider:<\/b> Doe Jane – Officer \(CEO\), Director/);
+  assert.match(result.text, /<b>Verkauf:<\/b> 6\.000 Aktien zu Ø 15,00 \$ = 90\.000 \$/);
+  assert.match(result.text, /<b>Handelstag:<\/b> 2026-11-11\n/);
+  assert.match(result.text, /<b>Bestand danach:<\/b> 19\.000 Aktien \(−24,0 %\)/);
+  assert.match(result.text, /<b>Früherer Kauf:<\/b> gemeldet am 2026-11-10, 5\.000 Aktien zu Ø 10,20 \$/);
+  assert.match(result.text, /Du hattest zu diesem Kauf eine Order gesendet\. Es wird nichts automatisch verkauft – prüfe in der IBKR-App, ob die Position noch besteht/);
+  assert.match(result.text, /<a href="https:\/\/www\.sec\.gov\/y">Form 4 bei der SEC<\/a>$/);
+  assert.ok(!result.text.includes('10b5-1'));
+});
+
+test('Build_Sell_Alert: ohne gesendete Order, mit Handelsplan, Komplettverkauf und fremden Texten', async () => {
+  const result = await sellAlert({
+    issuerName: 'A <b>& B', insiderName: '<script>', mentions10b51: true, link: null,
+    followed: { ...SELL_ALERT.followed, orderSent: false },
+    sale: { ...SELL_ALERT.sale, firstDate: '2026-11-09', sharesOwnedBefore: 0, sharesOwnedAfter: 0, holdingsDecreasePct: null },
+  });
+  assert.match(result.text, /– der Kauf dieses Insiders wurde dir gemeldet\nA &lt;b&gt;&amp; B\n/);
+  assert.match(result.text, /<b>Insider:<\/b> &lt;script&gt; –/);
+  assert.match(result.text, /<b>Handelstag:<\/b> 2026-11-09 bis 2026-11-11\n/);
+  assert.match(result.text, /<b>Bestand danach:<\/b> 0 Aktien\n/);
+  assert.match(result.text, /Rule 10b5-1\) – solche Verkäufe sagen wenig/);
+  assert.match(result.text, /Zu diesem Kauf hattest du keine Order gesendet\.$/);
+});
+
 // ----------------------------------------------------------- Build_Prompt
 
 const SIGNAL = {
   accessionNo: '0001000000-26-000001', ticker: 'ACME', issuerName: 'ACME Corp', insiderName: 'Doe Jane', role: 'Officer (CEO)',
-  filedAt: '2026-11-10', transactionCodes: ['P'], footnotes: [], link: 'https://www.sec.gov/x',
+  filedAt: '2026-11-10', transactionCodes: ['P'], mentions10b51: false, footnotes: [], link: 'https://www.sec.gov/x',
   purchase: { lots: 1, shares: 5000, value: 51000, avgPrice: 10.2, firstDate: '2026-11-09', lastDate: '2026-11-09', sharesOwnedBefore: 20000, sharesOwnedAfter: 25000, holdingsIncreasePct: 25 },
 };
 const quote = (price = 12) => ({ quoteSummary: { result: [{
@@ -149,12 +250,22 @@ const quote = (price = 12) => ({ quoteSummary: { result: [{
   defaultKeyStatistics: { shortPercentOfFloat: { raw: 0.075 } },
 }] } });
 
+const CLUSTER = {
+  windowDays: 14, historyDays: 30, otherInsiders: 2, insidersWithSamePurchase: 0, totalValue: 150000,
+  purchases: [
+    { insiderName: 'Roe Richard', role: 'Director', filedDate: '2026-11-06', shares: 10000, value: 100000, sameAsThisPurchase: false },
+    { insiderName: 'Poe <Pat>', role: 'Officer (CFO)', filedDate: '2026-11-02', shares: 5000, value: 50000, sameAsThisPurchase: false },
+  ],
+};
+const STORED = { stored: true, isNew: true, cluster: CLUSTER, sellAlert: null };
+
 test('Build_Prompt berechnet Erfolgsquote, filtert 13F-Positionen und baut eine gültige Anfrage', async () => {
   const [{ facts, llmRequest }] = await run('Build_Prompt', {
     input: [quote()],
     nodes: {
       Config: config(),
       Parse_Form4: [SIGNAL],
+      Store_Filing: [STORED],
       Insider_Historie: [{ transactions: [
         form4([tx('P', 5000, 10.2, 25000)]), // das aktuelle Filing zählt nicht zur Historie
         form4([tx('P', 4000, 8, 24000)], { accessionNo: 'old-1' }),
@@ -182,6 +293,10 @@ test('Build_Prompt berechnet Erfolgsquote, filtert 13F-Positionen und baut eine 
   assert.equal(facts.market.trailingPE, 18.44);
   assert.equal(facts.derived.purchaseValuePctOfMarketCap, 0.0034);
   assert.equal(facts.derived.currentPriceVsInsiderPricePct, 17.6);
+  assert.deepEqual(facts.cluster, {
+    windowDays: 14, otherInsiders: 2, insidersWithSamePurchase: 0, totalValueUsd: 150000, purchases: CLUSTER.purchases, historyDays: 30, complete: true,
+  });
+  assert.equal(facts.mentions10b51, false);
 
   // Anfrage: aktuelles Modell, keine Parameter, die die API inzwischen ablehnt.
   assert.equal(llmRequest.model, 'claude-haiku-5-5');
@@ -189,17 +304,42 @@ test('Build_Prompt berechnet Erfolgsquote, filtert 13F-Positionen und baut eine 
   assert.equal(llmRequest.output_config.format.schema.additionalProperties, false);
   assert.equal(llmRequest.messages.at(-1).role, 'user');
   assert.ok(!llmRequest.messages[0].content.includes('sec.gov'), 'der Link gehört nicht in den Prompt');
+  assert.match(llmRequest.messages[0].content, /"cluster": \{\s+"windowDays": 14,\s+"otherInsiders": 2,/, 'der Cluster steht im Faktenblock für das Modell');
+  assert.match(llmRequest.system, /"cluster" nennt weitere Insider/);
+  assert.match(llmRequest.system, /"sameAsThisPurchase": true.+kein unabhängiger zweiter Käufer/);
+});
+
+test('Build_Prompt: Cluster aus der Datenbank – unvollständige Historie wird gekennzeichnet, ein Ausfall nicht geraten', async () => {
+  const cluster = async (stored) => {
+    const [{ facts }] = await run('Build_Prompt', {
+      input: [quote()],
+      nodes: { Config: config(), Parse_Form4: [{ ...SIGNAL, mentions10b51: true }], Store_Filing: [stored], Insider_Historie: [{}], '13F_Request': [{}] },
+    });
+    assert.equal(facts.mentions10b51, true);
+    return facts.cluster;
+  };
+
+  const fresh = await cluster({ stored: true, cluster: { windowDays: 14, historyDays: 3, otherInsiders: 0, insidersWithSamePurchase: 0, totalValue: 0, purchases: [] } });
+  assert.deepEqual(fresh, { windowDays: 14, otherInsiders: 0, insidersWithSamePurchase: 0, totalValueUsd: 0, purchases: [], historyDays: 3, complete: false });
+
+  const twin = await cluster({ stored: true, cluster: { ...CLUSTER, otherInsiders: 1, insidersWithSamePurchase: 1, purchases: [{ ...CLUSTER.purchases[0], sameAsThisPurchase: true }] } });
+  assert.deepEqual([twin.insidersWithSamePurchase, twin.purchases[0].sameAsThisPurchase], [1, true], 'die Kennzeichnung erreicht das Modell');
+
+  assert.equal(await cluster({ error: { message: 'connect ECONNREFUSED' } }), null, 'Datenbank nicht erreichbar');
+  assert.equal(await cluster({ stored: false, cluster: null, sellAlert: null }), null);
+  assert.equal(await cluster({}), null);
 });
 
 test('Build_Prompt kennzeichnet ausgefallene Datenquellen mit null statt mit erfundenen Werten', async () => {
   const failed = [{ error: { message: 'timeout' } }];
   const [{ facts }] = await run('Build_Prompt', {
     input: failed,
-    nodes: { Config: config(), Parse_Form4: [SIGNAL], Insider_Historie: failed, '13F_Request': failed },
+    nodes: { Config: config(), Parse_Form4: [SIGNAL], Store_Filing: failed, Insider_Historie: failed, '13F_Request': failed },
   });
   assert.equal(facts.market, null);
   assert.equal(facts.history, null);
   assert.equal(facts.institutions, null);
+  assert.equal(facts.cluster, null);
   assert.deepEqual(facts.derived, { purchaseValuePctOfMarketCap: null, currentPriceVsInsiderPricePct: null });
 });
 
@@ -208,6 +348,7 @@ test('Build_Prompt kennzeichnet ausgefallene Datenquellen mit null statt mit erf
 const FACTS = {
   ...SIGNAL,
   market: null, history: null, institutions: null,
+  cluster: { windowDays: 14, otherInsiders: 0, insidersWithSamePurchase: 0, totalValueUsd: 0, purchases: [], historyDays: 30, complete: true },
   derived: { purchaseValuePctOfMarketCap: null, currentPriceVsInsiderPricePct: null },
 };
 const llmAnswer = (verdict, stopReason = 'end_turn') => [{
@@ -295,6 +436,37 @@ test('Build_Message maskiert HTML in Fremdtexten', async () => {
   assert.match(result.message, /&lt;script&gt;/);
   assert.match(result.message, /x &lt; y &amp; z/);
   assert.match(result.message, /➕ &lt;i&gt;pro&lt;\/i&gt;/);
+});
+
+test('Build_Message nennt Cluster-Käufe und sagt offen, wenn die Datenbank nicht geprüft werden konnte', async () => {
+  const single = await message();
+  assert.match(single.message, /<b>Cluster:<\/b> kein weiterer Insiderkauf in den 14 Tagen davor\n/);
+  assert.ok(!single.message.includes('Rule 10b5-1'));
+
+  const young = (historyDays) => message({ facts: { cluster: { ...FACTS.cluster, historyDays, complete: false } } });
+  assert.match((await young(3)).message, /kein weiterer Insiderkauf in den 14 Tagen davor \(Datenbank reicht erst 3 Tage zurück\)/);
+  assert.match((await young(1)).message, /\(Datenbank reicht erst 1 Tag zurück\)/);
+  assert.match((await young(0)).message, /\(Datenbank reicht weniger als einen Tag zurück\)/);
+
+  const purchases = CLUSTER.purchases;
+  const one = await message({ facts: { cluster: { ...FACTS.cluster, otherInsiders: 1, totalValueUsd: 100000, purchases: purchases.slice(0, 1) } } });
+  assert.match(one.message, /<b>Cluster:<\/b> 1 weiterer Insider kaufte in den 14 Tagen davor – Roe Richard \(100\.000 \$, 2026-11-06\)\n/);
+
+  const many = await message({ facts: { mentions10b51: true, cluster: { ...FACTS.cluster, otherInsiders: 2, totalValueUsd: 150000, purchases } } });
+  assert.match(many.message, /<b>Cluster:<\/b> 2 weitere Insider kauften in den 14 Tagen davor – Roe Richard \(100\.000 \$, 2026-11-06\); Poe &lt;Pat&gt; \(50\.000 \$, 2026-11-02\)\n/);
+  assert.match(many.message, /<b>Hinweis:<\/b> Das Filing erwähnt einen vorab festgelegten Handelsplan \(Rule 10b5-1\)/);
+  assert.ok(!many.message.includes('dieselbe Transaktion'));
+
+  // Ein Fonds und sein Verwalter melden denselben Kauf getrennt: gezählt, aber gekennzeichnet.
+  const twin = await message({ facts: { cluster: {
+    ...FACTS.cluster, otherInsiders: 2, insidersWithSamePurchase: 1, totalValueUsd: 151000,
+    purchases: [{ ...purchases[0], value: 51000, sameAsThisPurchase: true }, purchases[1]],
+  } } });
+  assert.match(twin.message, /– Roe Richard \(51\.000 \$, 2026-11-06\) ⚠️; Poe &lt;Pat&gt; \(50\.000 \$, 2026-11-02\)\n⚠️ Gleiche Stückzahl und gleicher Kaufwert wie dieser Kauf – vermutlich dieselbe Transaktion, doppelt gemeldet, und kein unabhängiger zweiter Käufer\.\n/);
+
+  const unknown = await message({ facts: { cluster: null } });
+  assert.match(unknown.message, /<b>Cluster:<\/b> nicht geprüft – Datenbank nicht erreichbar/);
+  assert.equal(unknown.hasOrder, true, 'der Order-Vorschlag hängt nicht an der Datenbank');
 });
 
 // --------------------------------------------------------- Parse_Callback
@@ -444,6 +616,20 @@ test('Workflow, Bridge und init.sh passen zusammen', () => {
     assert.ok(journal.includes(`'POST ${route}'`), `Journal-Dienst kennt POST ${route} nicht`);
     assert.equal(node(name).onError, undefined, `${name} darf Fehler nicht verschlucken`);
   }
+
+  // Jede Meldung geht zuerst in die Datenbank. Fällt sie aus, läuft die Pipeline
+  // trotzdem weiter – die Nachricht sagt dann "Cluster: nicht geprüft".
+  assert.ok(node('Store_Filing').parameters.url.endsWith('/filings'));
+  assert.ok(journal.includes("'POST /filings'"), 'Journal-Dienst kennt POST /filings nicht');
+  assert.equal(node('Store_Filing').onError, 'continueRegularOutput');
+  const targets = (name, output = 0) => (workflow.connections[name].main[output] || []).map((target) => target.node);
+  assert.deepEqual(targets('Parse_Form4'), ['Store_Filing'], 'gespeichert wird vor dem Kauf-Filter – also auch jeder Verkauf');
+  assert.deepEqual(targets('Store_Filing'), ['Verkaufswarnung?']);
+  assert.deepEqual(targets('Verkaufswarnung?', 0), ['Build_Sell_Alert']);
+  assert.deepEqual(targets('Verkaufswarnung?', 1), ['Kauf-Filter']);
+  assert.deepEqual(targets('Build_Sell_Alert'), ['Telegram (Verkaufswarnung)']);
+  assert.deepEqual(targets('Telegram (Verkaufswarnung)'), ['Kauf-Filter'], 'eine Meldung mit Verkauf und Kauf wird danach normal weiterverarbeitet');
+  assert.equal(node('Telegram (Verkaufswarnung)').onError, undefined, 'eine nicht zustellbare Warnung darf nicht still untergehen');
 
   // Im Workflow stehen keine Zugangsdaten.
   assert.doesNotMatch(JSON.stringify(workflow), /sk-ant-|token=|apiKey=|bot\d+:/i);

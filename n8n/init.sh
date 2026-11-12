@@ -6,8 +6,10 @@
 #   3. veröffentlicht (aktiviert) ihn.
 #
 # Ein bereits vorhandener Workflow wird nicht überschrieben, damit Änderungen
-# aus der n8n-Oberfläche erhalten bleiben. Neu einspielen:
-#   WORKFLOW_IMPORT=force docker compose up n8n-init
+# aus der n8n-Oberfläche erhalten bleiben. Neu einspielen (siehe README, "Aktualisieren"):
+#   docker compose down
+#   docker compose run --rm -e WORKFLOW_IMPORT=force n8n-init
+#   docker compose up -d
 set -eu
 
 WORKFLOW_ID="insiderPipeline1"

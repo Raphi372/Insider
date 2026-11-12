@@ -7,22 +7,14 @@ const { evaluateSignal } = require('./evaluate');
 const { loadPrices } = require('./backtest');
 const { horizonTable, segmentTable } = require('./analysis');
 const { table, toCsv, pct } = require('./render');
+const { decisionsByMessage } = require('./decisions');
 
 const today = () => new Date().toISOString().slice(0, 10);
 
-/** Was nach der Telegram-Nachricht geschah, je Nachricht. */
-function decisionsByMessage(events) {
-  const rank = { 'Order gesendet': 3, 'Order abgelehnt': 2, verworfen: 1 };
-  const decisions = new Map();
-  for (const event of events) {
-    let decision = null;
-    if (event.action === 'order') decision = event.placed ? 'Order gesendet' : 'Order abgelehnt';
-    if (event.action === 'discard') decision = 'verworfen';
-    if (!decision || event.telegramMessageId === null || event.telegramMessageId === undefined) continue;
-    const key = String(event.telegramMessageId);
-    if ((rank[decision] || 0) > (rank[decisions.get(key)] || 0)) decisions.set(key, decision);
-  }
-  return decisions;
+/** Ob beim Signal weitere Insider desselben Unternehmens gekauft hatten (aus dem Protokoll). */
+function clusterLabel(cluster) {
+  if (!cluster || typeof cluster.otherInsiders !== 'number') return 'unbekannt';
+  return cluster.otherInsiders > 0 ? 'Cluster (mehrere Insider)' : 'Einzelkauf';
 }
 
 /**
@@ -52,7 +44,7 @@ async function runReport(params, deps) {
         entry,
         signal,
         result: evaluateSignal(signal, prices.byTicker.get(signal.ticker), prices.benchmarkByDate, params),
-        labels: { rating: entry.rating || 'ohne Einstufung', decision },
+        labels: { rating: entry.rating || 'ohne Einstufung', decision, cluster: clusterLabel(entry.cluster) },
       };
     });
   const evaluated = items.filter((item) => item.result.status === 'ok');
@@ -70,6 +62,7 @@ async function runReport(params, deps) {
     lines.push('', '## Alle Signale', '', horizonTable(evaluated, params.horizons));
     lines.push('', '## Nach Einstufung des Modells', '', segmentTable(evaluated, 'rating', params.horizons, { compact: true }));
     lines.push('', '## Nach deiner Entscheidung', '', segmentTable(evaluated, 'decision', params.horizons, { compact: true }));
+    lines.push('', '## Cluster-Käufe', '', segmentTable(evaluated, 'cluster', params.horizons, { compact: true }));
   }
 
   lines.push('', '## Letzte Signale', '');
@@ -95,6 +88,7 @@ async function runReport(params, deps) {
       valueUsd: item.signal.purchase.value,
       rating: item.labels.rating,
       decision: item.labels.decision,
+      cluster: item.labels.cluster,
       status: item.result.status,
       entryDate: item.result.entryDate || null,
       entryOpen: item.result.entryOpen ? Number(item.result.entryOpen.toFixed(4)) : null,

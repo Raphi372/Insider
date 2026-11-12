@@ -53,7 +53,7 @@ services:
       IBKR_BASE_URL: ${IBKR_BASE_URL:-https://ibkr-gateway:5000}
       JOURNAL_BASE_URL: http://journal:8090
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-5-5}
-      MIN_SHARES: ${MIN_SHARES:-1000}
+      MIN_PURCHASE_VALUE_USD: ${MIN_PURCHASE_VALUE_USD:-25000}
       ORDER_BUDGET_USD: ${ORDER_BUDGET_USD:-5000}
       ORDER_QUANTITY: ${ORDER_QUANTITY:-}
       STOP_LOSS_PCT: ${STOP_LOSS_PCT:-8}
@@ -87,21 +87,26 @@ services:
       SEC_STREAM_URL: ${INSIDER_SEC_STREAM_URL:-wss://stream.sec-api.io}
       # Nur für den Testlauf "node src/replay.js" (sucht ein passendes Form 4).
       SEC_API_BASE_URL: ${INSIDER_SEC_API_BASE_URL:-https://api.sec-api.io}
-      MIN_SHARES: ${MIN_SHARES:-1000}
+      MIN_PURCHASE_VALUE_USD: ${MIN_PURCHASE_VALUE_USD:-25000}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       TELEGRAM_BASE_URL: ${INSIDER_TELEGRAM_BASE_URL:-https://api.telegram.org}
       BRIDGE_SECRET: ${BRIDGE_SECRET:-}
       N8N_WEBHOOK_BASE_URL: http://n8n:5678/webhook
 
-  # Signal-Protokoll: nimmt jede Meldung und jede Entscheidung der Pipeline
-  # entgegen und schreibt sie nach ./data (signals.jsonl, events.jsonl).
+  # Datenbank und Signal-Protokoll: speichert jedes Form 4, das die Pipeline
+  # sieht (./data/insider.db), erkennt daraus Cluster-Käufe und Verkäufe von
+  # Insidern, denen du gefolgt bist, und protokolliert jedes Signal und jede
+  # Entscheidung (./data/signals.jsonl, events.jsonl).
   journal:
     build: ./research
     command: ["journal"]
     restart: unless-stopped
     environment:
       TZ: ${TZ:-Europe/Berlin}
+      CLUSTER_DAYS: ${CLUSTER_DAYS:-14}
+      SELL_ALERT_SCOPE: ${SELL_ALERT_SCOPE:-orders}
+      SELL_ALERT_LOOKBACK_DAYS: ${SELL_ALERT_LOOKBACK_DAYS:-365}
     volumes:
       - ./data:/data
     healthcheck:
@@ -110,19 +115,26 @@ services:
       timeout: 5s
       retries: 6
 
-  # Auswertung und Backtest, nur bei Bedarf:
+  # Werkzeuge, nur bei Bedarf:
+  #   docker compose run --rm research backfill --days 30   (Datenbank vorfüllen)
+  #   docker compose run --rm research stats                (Stand der Datenbank)
   #   docker compose run --rm research report
   #   docker compose run --rm research backtest --from 2024-01-01
   research:
     build: ./research
     profiles: ["tools"]
+    # backfill und stats sprechen mit dem Protokoll-Dienst – nur er öffnet die Datenbank.
+    depends_on:
+      journal:
+        condition: service_healthy
     environment:
       TZ: ${TZ:-Europe/Berlin}
       SEC_API_KEY: ${SEC_API_KEY:-}
       SEC_API_BASE_URL: ${INSIDER_SEC_API_BASE_URL:-https://api.sec-api.io}
       YAHOO_BASE_URL: ${INSIDER_YAHOO_BASE_URL:-https://query1.finance.yahoo.com}
       YAHOO_COOKIE_URL: ${INSIDER_YAHOO_COOKIE_URL:-https://fc.yahoo.com}
-      MIN_SHARES: ${MIN_SHARES:-1000}
+      MIN_PURCHASE_VALUE_USD: ${MIN_PURCHASE_VALUE_USD:-25000}
+      CLUSTER_DAYS: ${CLUSTER_DAYS:-14}
       STOP_LOSS_PCT: ${STOP_LOSS_PCT:-8}
       TAKE_PROFIT_PCT: ${TAKE_PROFIT_PCT:-15}
     volumes:

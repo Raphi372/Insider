@@ -31,7 +31,7 @@ function monthWindows(from, to) {
 
 /** Nur die Felder, die Auswertung und Merkmale brauchen – hält den Cache klein. */
 function compact(signal) {
-  const { footnotes, link, transactionCodes, periodOfReport, ...rest } = signal;
+  const { footnotes, link, transactionCodes, periodOfReport, transactions, sale, ...rest } = signal;
   return rest;
 }
 
@@ -82,8 +82,11 @@ class SecApiClient {
     }
   }
 
-  /** Alle Käufe mit filedAt in [from, to]; teilt das Fenster, wenn es zu viele Treffer hat. */
-  async fetchWindow(from, to) {
+  /**
+   * Alle Käufe mit filedAt in [from, to]; teilt das Fenster, wenn es zu viele Treffer hat.
+   * `full` liefert die Signale ungekürzt (mit allen Transaktionen) für die Datenbank.
+   */
+  async fetchWindow(from, to, full = false) {
     const query = `documentType:4 AND nonDerivativeTable.transactions.coding.code:P AND filedAt:[${from} TO ${to}]`;
     const signals = [];
 
@@ -94,13 +97,13 @@ class SecApiClient {
           break;
         }
         const middle = addDays(from, Math.floor(daysBetween(from, to) / 2));
-        return [...await this.fetchWindow(from, middle), ...await this.fetchWindow(middle, to)];
+        return [...await this.fetchWindow(from, middle, full), ...await this.fetchWindow(middle, to, full)];
       }
       const page = await this.query({ query, from: offset, size: PAGE_SIZE, sort: [{ filedAt: { order: 'asc' } }] });
       const filings = page.transactions || [];
       for (const filing of filings) {
         const signal = parseForm4(filing);
-        if (isPurchase(signal) && signal.filedAt) signals.push(compact(signal));
+        if (isPurchase(signal) && signal.filedAt) signals.push(full ? signal : compact(signal));
       }
       if (filings.length < PAGE_SIZE) break;
     }
@@ -110,17 +113,18 @@ class SecApiClient {
   /**
    * Alle Insiderkäufe im Zeitraum, ohne Dubletten und nach Meldezeit sortiert.
    * Abgeschlossene Monatsfenster werden auf der Platte zwischengespeichert.
+   * Mit `full: true` kommen die Signale ungekürzt und am Cache vorbei.
    */
-  async fetchPurchases(from, to) {
+  async fetchPurchases(from, to, { full = false } = {}) {
     const byAccession = new Map();
 
     for (const [start, end] of monthWindows(from, to)) {
-      const cacheFile = this.cacheDir && path.join(this.cacheDir, `${start}_${end}.json`);
+      const cacheFile = !full && this.cacheDir && path.join(this.cacheDir, `${start}_${end}.json`);
       let signals;
       if (cacheFile && fs.existsSync(cacheFile)) {
         signals = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
       } else {
-        signals = await this.fetchWindow(start, end);
+        signals = await this.fetchWindow(start, end, full);
         // Ein Fenster, das bis heute reicht, kann noch wachsen – nicht speichern.
         if (cacheFile && end < today()) fs.writeFileSync(cacheFile, JSON.stringify(signals));
         this.log(`  ${start} bis ${end}: ${signals.length} Käufe geladen`);

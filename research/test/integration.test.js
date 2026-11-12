@@ -12,7 +12,7 @@ const { SecApiClient, monthWindows } = require('../src/sec-api');
 const { createJournal, createServer } = require('../src/journal');
 const { runBacktest } = require('../src/backtest');
 const { runReport, decisionsByMessage } = require('../src/report');
-const { parseArgs, buildParams } = require('../src/cli');
+const { parseArgs, buildParams, journalContext } = require('../src/cli');
 const { makeBars, signal, jsonResponse } = require('./helpers');
 
 const noSleep = () => Promise.resolve();
@@ -146,7 +146,7 @@ test('SecApiClient: blättert, entfernt Dubletten an Fenstergrenzen, verwirft Ni
   assert.equal(signals.length, 122, '120 + Grenzfall + Kleinkauf; Verkauf, Preis 0 und fehlender Ticker fallen weg');
   assert.equal(signals.filter((s) => s.accessionNo === 'grenze').length, 1);
   assert.ok(signals.every((s, i) => i === 0 || signals[i - 1].filedAt <= s.filedAt), 'nach Meldezeit sortiert');
-  assert.equal(signals[0].footnotes, undefined, 'der Cache enthält nur, was die Auswertung braucht');
+  assert.deepEqual([signals[0].footnotes, signals[0].transactions], [undefined, undefined], 'der Cache enthält nur, was die Auswertung braucht');
 
   assert.equal(api.requests[0].url, 'https://sec.test/insider-trading?token=k%20y');
   assert.equal(api.requests[0].body.query, 'documentType:4 AND nonDerivativeTable.transactions.coding.code:P AND filedAt:[2024-01-01 TO 2024-02-01]');
@@ -155,6 +155,12 @@ test('SecApiClient: blättert, entfernt Dubletten an Fenstergrenzen, verwirft Ni
   const before = api.requests.length;
   await client.fetchPurchases('2024-01-01', '2024-02-29');
   assert.equal(api.requests.length, before, 'abgeschlossene Monate kommen aus dem Cache');
+
+  // Für die Datenbank: ungekürzt und am Cache vorbei.
+  const full = await client.fetchPurchases('2024-02-01', '2024-02-29', { full: true });
+  assert.equal(full.length, 2);
+  assert.deepEqual(full[0].transactions.map((row) => row.code), ['P']);
+  assert.ok(api.requests.length > before);
 });
 
 test('SecApiClient teilt ein Fenster, das die Treffergrenze der Suche erreicht', async () => {
@@ -221,7 +227,7 @@ test('Journal-Dienst nimmt Signale und Ereignisse per HTTP an und prüft Pflicht
 const fakePrices = (byTicker) => ({ getBars: async (ticker) => (byTicker[ticker] ? { bars: byTicker[ticker], splits: [] } : null) });
 
 const BACKTEST = {
-  from: '2024-03-01', to: '2024-03-31', minShares: 1000, stopLossPct: 8, takeProfitPct: 15, maxHoldDays: 20,
+  from: '2024-03-01', to: '2024-03-31', minValue: 25000, minShares: 0, stopLossPct: 8, takeProfitPct: 15, maxHoldDays: 20,
   limitValidDays: 10, costBps: 10, lookbackYears: 0, clusterDays: 14, benchmark: 'SPY', horizons: [5, 20],
 };
 
@@ -239,7 +245,8 @@ test('Backtest: Filter, Renditen, Order-Regeln, Merkmale und Dateien', async (t)
   const universe = [
     signal({ ...base, accessionNo: 'up', ticker: 'UP', issuerCik: '1', insiderCik: '100' }),
     signal({ ...base, accessionNo: 'down', ticker: 'DOWN', issuerCik: '2', insiderCik: '200', role: 'Director', isOfficer: false, isDirector: true }),
-    signal({ ...base, accessionNo: 'klein', ticker: 'UP', issuerCik: '1', insiderCik: '300', purchase: { ...base.purchase, shares: 500 } }),
+    // 500 Aktien zu 10 $: als Kauf bekannt, aber unter dem Mindest-Kaufwert.
+    signal({ ...base, accessionNo: 'klein', ticker: 'UP', issuerCik: '1', insiderCik: '300', purchase: { ...base.purchase, shares: 500, value: 5000 } }),
     signal({ ...base, accessionNo: 'weg', ticker: 'GONE', issuerCik: '3', insiderCik: '400' }),
   ];
   const fetched = [];
@@ -251,6 +258,7 @@ test('Backtest: Filter, Renditen, Order-Regeln, Merkmale und Dateien', async (t)
   assert.deepEqual(excluded, { 'keine Kursdaten': 1 });
   assert.match(report, /Insiderkäufe im Zeitraum \(alle Größen\): 4/);
   assert.match(report, /davon über dem Filter: 3/);
+  assert.match(report, /Filter wie im Workflow: Offenmarktkauf \(Code P\), Kaufwert ab 25\.000 \$, Preis über 0\./);
   assert.match(report, /auswertbar: 2/);
   assert.match(report, /Achtung: Zu 1 von 3 Signalen liefert Yahoo keine Kurse/);
 
@@ -371,9 +379,20 @@ test('Kommandozeile: Optionen, Standardwerte aus der .env und klare Fehlermeldun
 
   const params = buildParams({ from: '2024-01-01', to: '2024-12-31', 'max-hold': '40' }, { STOP_LOSS_PCT: '5', DATA_DIR: '/data' }, 'backtest');
   assert.deepEqual(
-    [params.from, params.to, params.maxHoldDays, params.stopLossPct, params.takeProfitPct, params.minShares, params.outDir],
-    ['2024-01-01', '2024-12-31', 40, 5, 15, 1000, '/data/backtest'],
+    [params.from, params.to, params.maxHoldDays, params.stopLossPct, params.takeProfitPct, params.minValue, params.minShares, params.clusterDays, params.outDir],
+    ['2024-01-01', '2024-12-31', 40, 5, 15, 25000, 0, 14, '/data/backtest'],
   );
+  // Filter und Cluster-Fenster kommen aus derselben .env wie beim Workflow.
+  const fromEnv = buildParams({ 'min-shares': '500' }, { MIN_PURCHASE_VALUE_USD: '100000', CLUSTER_DAYS: '7' }, 'backtest');
+  assert.deepEqual([fromEnv.minValue, fromEnv.minShares, fromEnv.clusterDays], [100000, 500, 7]);
+  assert.equal(buildParams({ 'min-value': '0' }, { MIN_PURCHASE_VALUE_USD: '100000' }, 'backtest').minValue, 0, 'die Option hat Vorrang');
+  assert.deepEqual(journalContext({}), { clusterDays: 14, sellAlert: { scope: 'orders', lookbackDays: 365 } });
+  assert.deepEqual(journalContext({ CLUSTER_DAYS: '7', SELL_ALERT_SCOPE: 'signals', SELL_ALERT_LOOKBACK_DAYS: '90' }),
+    { clusterDays: 7, sellAlert: { scope: 'signals', lookbackDays: 90 } });
+  assert.equal(journalContext({ SELL_ALERT_SCOPE: ' Off ' }).sellAlert.scope, 'off');
+  const warnings = [];
+  assert.equal(journalContext({ SELL_ALERT_SCOPE: 'signal' }, (message) => warnings.push(message)).sellAlert.scope, 'orders', 'ein Tippfehler schaltet nichts Unerwartetes ein');
+  assert.match(warnings.join(), /SELL_ALERT_SCOPE="signal" ist unbekannt \(erlaubt: orders, signals, off\)/);
   assert.deepEqual(params.horizons, [5, 20, 60, 120]);
   assert.deepEqual(buildParams({}, { DATA_DIR: '/data' }, 'report').horizons, [5, 20, 60]);
   assert.equal(buildParams({}, { ORDER_QUANTITY: '' }, 'backtest').to, today());

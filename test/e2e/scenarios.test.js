@@ -6,56 +6,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { streamFiling, BROKEN_ACCESSION, LLM_VERDICT } = require('./fixtures');
+const {
+  CHAT_ID, sleep, control, requests, telegram, emit, click, waitFor, waitForMessages, buttons,
+  journal, loggedSignal, loggedEvent, webhook, bridgeConnected,
+} = require('./helpers');
 
-const MOCK = process.env.MOCK_URL || 'http://mock:8080';
-const CHAT_ID = 4242;
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function control(path, body) {
-  const response = await fetch(`${MOCK}/__control/${path}`, body === undefined ? undefined : {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return response.json();
-}
-
-const requests = (service) => control(`requests?service=${service}`);
-const telegram = async (method) => (await requests('telegram')).filter((r) => r.path.endsWith(`/${method}`));
-const emit = (...filings) => control('emit', filings);
-const click = (data, messageId, extra = {}) => control('click', { data, messageId, fromId: CHAT_ID, ...extra });
-
-async function waitFor(description, probe, timeoutMs = 60000) {
-  const start = Date.now();
-  for (;;) {
-    const value = await probe();
-    if (value) return value;
-    if (Date.now() - start > timeoutMs) throw new Error(`Zeitüberschreitung: ${description}`);
-    await sleep(250);
-  }
-}
-
-const waitForMessages = (count, timeoutMs) => waitFor(`${count} Telegram-Nachricht(en)`, async () => {
-  const sent = await telegram('sendMessage');
-  return sent.length >= count ? sent : null;
-}, timeoutMs);
-
-const buttons = (message) => ((message.body.reply_markup || {}).inline_keyboard || []).flat();
-
-// Das Signal-Protokoll läuft als echter Dienst mit; es wird zwischen den Szenarien nicht geleert.
-const journal = (path) => fetch(`${process.env.JOURNAL_URL || 'http://journal:8090'}/${path}`).then((r) => r.json());
-const loggedSignal = (accessionNo) => waitFor(`Protokolleintrag ${accessionNo}`, async () =>
-  (await journal('signals')).find((entry) => entry.accessionNo === accessionNo));
-const loggedEvent = (messageId, action) => waitFor(`Ereignis ${action} zu Nachricht ${messageId}`, async () =>
-  (await journal('events')).find((event) => event.telegramMessageId === messageId && event.action === action));
-
-test.before(async () => {
-  // Die Bridge verbindet sich erst, wenn n8n läuft und der Workflow veröffentlicht ist.
-  await waitFor('Bridge mit dem Stream verbunden', async () => {
-    try { return (await control('status')).streamClients >= 1; } catch (err) { return false; }
-  }, 180000);
-});
+test.before(bridgeConnected);
 
 test.beforeEach(() => control('reset', {}));
 
@@ -77,6 +33,7 @@ test('Insiderkauf: Analyse per Telegram, Order erst nach Klick auf den Button', 
   assert.match(text, /<b>Insider:<\/b> Doe Jane – Officer \(Chief Financial Officer\)/);
   assert.match(text, /<b>Kauf:<\/b> 5\.000 Aktien zu Ø 10,20 \$ = 51\.000 \$/);
   assert.match(text, /<b>Bestand danach:<\/b> 25\.000 Aktien \(\+25,0 %\)/);
+  assert.match(text, /<b>Cluster:<\/b> kein weiterer Insiderkauf in den 14 Tagen davor \(Datenbank reicht weniger als einen Tag zurück\)/, 'die Datenbank ist noch leer – das steht dabei');
   assert.match(text, /Kurs 12,00 \$ \(\+17,6 % ggü\. Insiderpreis\) · Marktkap\. 1,50 Mrd\. \$/);
   assert.match(text, /KGV 18,4 · Short Interest 7,5 % des Floats/);
   assert.match(text, /<b>Historie:<\/b> 1 frühere Käufe, 1 Verkäufe · 1 von 1 Käufen heute im Plus \(Ø \+50,0 %/);
@@ -118,6 +75,8 @@ test('Insiderkauf: Analyse per Telegram, Order erst nach Klick auf den Button', 
   assert.equal(llm.body.messages.length, 1);
   assert.match(llm.body.messages[0].content, /"ticker": "ACME"/);
   assert.match(llm.body.messages[0].content, /"holdingsIncreasePct": 25/);
+  assert.match(llm.body.messages[0].content, /"cluster": \{\s+"windowDays": 14,\s+"otherInsiders": 0,/);
+  assert.match(llm.body.messages[0].content, /"complete": false/);
 
   // -- Bis hierhin wurde bei IBKR nur der Kontrakt nachgeschlagen
   let ibkr = await requests('ibkr');
@@ -136,6 +95,7 @@ test('Insiderkauf: Analyse per Telegram, Order erst nach Klick auf den Button', 
   assert.equal(entry.form4.insiderCik, '2000001');
   assert.equal(entry.market.price, 12);
   assert.equal(entry.history.priorPurchases, 1);
+  assert.deepEqual(entry.cluster, { windowDays: 14, otherInsiders: 0, insidersWithSamePurchase: 0, totalValueUsd: 0, purchases: [], historyDays: 0, complete: false });
   assert.deepEqual(entry.order, { ticker: 'ACME', conid: 111, quantity: 490, entry: 10.2, stopLoss: 9.38, takeProfit: 11.73 });
   assert.equal(typeof entry.telegramMessageId, 'number', 'über die Nachrichten-ID wird der spätere Klick zugeordnet');
 
@@ -174,22 +134,119 @@ test('Insiderkauf: Analyse per Telegram, Order erst nach Klick auf den Button', 
   // -- Auch die Entscheidung steht im Protokoll
   const event = await loggedEvent(messageId, 'order');
   assert.deepEqual([event.ticker, event.placed, event.orderIds], ['ACME', true, ['1001', '1002', '1003']]);
+
+  // -- Die Meldung liegt in der Datenbank – genau einmal, trotz Duplikat im Stream
+  const stats = await journal('stats');
+  assert.deepEqual(
+    [stats.filings, stats.withPurchases, stats.withSales, stats.transactions, stats.fromStream, stats.firstFiledDate],
+    [1, 1, 0, 2, 1, '2026-11-10'],
+  );
 });
 
-test('Verkauf, Preis 0 und zu kleine Stückzahl lösen nichts aus', async () => {
-  await emit(
-    streamFiling('0001000000-26-000002'),
-    streamFiling('0001000000-26-000003'),
-    streamFiling('0001000000-26-000004'),
+test('Kauft ein zweiter Insider desselben Unternehmens, nennt die Meldung den Cluster', async () => {
+  await emit(streamFiling('0001000000-26-000009'));
+
+  const [message] = await waitForMessages(1);
+  const { text } = message.body;
+  assert.match(text, /<b>Insiderkauf ACME<\/b>/);
+  assert.match(text, /<b>Insider:<\/b> Roe Richard – Director/);
+  assert.match(text, /<b>Kauf:<\/b> 4\.000 Aktien zu Ø 10,25 \$ = 41\.000 \$/);
+  assert.match(text, /<b>Bestand danach:<\/b> 4\.000 Aktien\n/, 'Erstkauf: keine Prozentangabe');
+  assert.match(text, /<b>Cluster:<\/b> 1 weiterer Insider kaufte in den 14 Tagen davor – Doe Jane \(51\.000 \$, 2026-11-10\)\n/);
+  assert.equal(buttons(message)[0].callback_data, 'o|ACME|111|487|10.25|9.43|11.79');
+
+  // Das Modell bekommt den Cluster als Tatsache vorgelegt.
+  const [llm] = await requests('anthropic');
+  assert.match(llm.body.messages[0].content, /"otherInsiders": 1,/);
+  assert.match(llm.body.messages[0].content, /"insiderName": "Doe Jane",\s+"role": "Officer \(Chief Financial Officer\)",\s+"filedDate": "2026-11-10"/);
+  assert.match(llm.body.system, /Käufe mehrerer Insider in kurzer Zeit \(Cluster\)/);
+
+  // Die Historie wird für diesen Insider abgefragt, nicht für die erste Käuferin.
+  assert.ok((await requests('sec')).some((r) => r.body.query === 'issuer.cik:1000001 AND reportingOwner.cik:2000002'));
+
+  const entry = await loggedSignal('0001000000-26-000009');
+  assert.deepEqual([entry.cluster.otherInsiders, entry.cluster.totalValueUsd, entry.cluster.purchases.length], [1, 51000, 1]);
+  assert.deepEqual([entry.cluster.insidersWithSamePurchase, entry.cluster.purchases[0].sameAsThisPurchase], [0, false], 'anderer Umfang, also ein eigener Kauf');
+  assert.equal(entry.form4.insiderName, 'Roe Richard');
+});
+
+test('Verkauft ein Insider, dessen Kauf du gefolgt bist, warnt Telegram – genau einmal', async () => {
+  const accessionNo = '0001000000-26-000010';
+  await emit(streamFiling(accessionNo));
+
+  const [message] = await waitForMessages(1);
+  const { text } = message.body;
+  assert.equal(String(message.body.chat_id), String(CHAT_ID));
+  assert.equal(message.body.parse_mode, 'HTML');
+  assert.match(text, /^🔻 <b>Insiderverkauf ACME<\/b> – du bist dem Kauf dieses Insiders gefolgt\nACME Corp &lt;Test &amp; Co&gt;\n/);
+  assert.match(text, /<b>Insider:<\/b> Doe Jane – Officer \(Chief Financial Officer\)/);
+  assert.match(text, /<b>Verkauf:<\/b> 6\.000 Aktien zu Ø 12,50 \$ = 75\.000 \$/);
+  assert.match(text, /<b>Handelstag:<\/b> 2026-11-11\n/);
+  assert.match(text, /<b>Bestand danach:<\/b> 19\.000 Aktien \(−24,0 %\)/);
+  assert.match(text, /<b>Früherer Kauf:<\/b> gemeldet am 2026-11-10, 5\.000 Aktien zu Ø 10,20 \$/);
+  assert.match(text, /vorab festgelegten Handelsplan \(Rule 10b5-1\)/);
+  assert.match(text, /Du hattest zu diesem Kauf eine Order gesendet\. Es wird nichts automatisch verkauft/);
+  assert.equal(buttons(message).length, 0, 'eine Warnung, kein Order-Vorschlag');
+  assert.ok(!text.includes('This message was sent automatically with n8n'));
+
+  // Die Warnung steht im Protokoll und verweist auf den Kauf aus dem ersten Szenario.
+  const alert = await waitFor('Verkaufswarnung im Protokoll', async () =>
+    (await journal('events')).find((event) => event.action === 'sell-alert' && event.accessionNo === accessionNo));
+  assert.deepEqual(
+    [alert.ticker, alert.followedAccessionNo, alert.orderSent, alert.saleShares, alert.saleValue],
+    ['ACME', '0001000000-26-000001', true, 6000, 75000],
   );
 
-  await waitFor('drei Form-4-Abfragen', async () => (await requests('sec')).length >= 3);
+  // Dieselbe Meldung noch einmal (z. B. ein Testlauf mit replay.js): gespeichert, aber keine zweite Warnung.
+  assert.equal((await webhook('sec-filing', { ...streamFiling(accessionNo), replay: true })).status, 200);
+  await waitFor('zweite Abfrage des Filings', async () => (await requests('sec')).length >= 2);
+  await sleep(4000);
+  assert.equal((await telegram('sendMessage')).length, 1);
+  assert.equal((await journal('events')).filter((event) => event.action === 'sell-alert').length, 1);
+
+  // Ein Verkauf ist kein Kaufsignal: keine Analyse, kein Kontrakt, keine weiteren Abfragen.
+  assert.equal((await requests('sec')).length, 2);
+  assert.equal((await requests('anthropic')).length, 0);
+  assert.equal((await requests('ibkr')).length, 0);
+  assert.equal((await journal('stats')).withSales, 1);
+});
+
+test('Verkauf, Preis 0 und zu kleiner Kaufwert lösen nichts aus – gespeichert werden sie trotzdem', async () => {
+  const before = await journal('stats');
+  await emit(
+    streamFiling('0001000000-26-000002'), // Verkauf
+    streamFiling('0001000000-26-000003'), // Preis 0
+    streamFiling('0001000000-26-000004'), // 500 × 30 $ = 15.000 $
+    streamFiling('0001000000-26-000012'), // 5.000 × 2 $ = 10.000 $ – viele Aktien, wenig Geld
+  );
+
+  await waitFor('vier Form-4-Abfragen', async () => (await requests('sec')).length >= 4);
+  const after = await waitFor('vier Meldungen in der Datenbank', async () => {
+    const stats = await journal('stats');
+    return stats.filings >= before.filings + 4 ? stats : null;
+  });
   await sleep(4000);
 
-  assert.equal((await requests('sec')).length, 3, 'nach dem Filter darf keine weitere Abfrage folgen');
+  assert.equal((await requests('sec')).length, 4, 'nach dem Filter darf keine weitere Abfrage folgen');
   assert.equal((await requests('anthropic')).length, 0);
   assert.equal((await requests('ibkr')).length, 0);
   assert.equal((await telegram('sendMessage')).length, 0);
+  assert.deepEqual(
+    [after.filings - before.filings, after.withPurchases - before.withPurchases, after.withSales - before.withSales],
+    [4, 2, 1],
+    'alle vier Meldungen liegen in der Datenbank',
+  );
+});
+
+test('Wenige teure Aktien: Es zählt der Kaufwert, nicht die Stückzahl', async () => {
+  await emit(streamFiling('0001000000-26-000011'));
+
+  const [message] = await waitForMessages(1);
+  assert.match(message.body.text, /<b>Insiderkauf PRCY<\/b>/);
+  assert.match(message.body.text, /<b>Kauf:<\/b> 300 Aktien zu Ø 900,00 \$ = 270\.000 \$/);
+  assert.match(message.body.text, /Kauf 5 × PRCY, Limit 900,00 \$ \(4\.500 \$\)/);
+  assert.equal(buttons(message)[0].callback_data, 'o|PRCY|555|5|900|828|1035');
+  assert.equal((await loggedSignal('0001000000-26-000011')).form4.purchase.value, 270000);
 });
 
 test('Fallen Yahoo und Anthropic aus, kommt die Meldung trotzdem – ohne KI-Einstufung', async () => {
@@ -208,6 +265,19 @@ test('Fallen Yahoo und Anthropic aus, kommt die Meldung trotzdem – ohne KI-Ein
   const entry = await loggedSignal('0001000000-26-000006');
   assert.deepEqual([entry.rating, entry.analysis, entry.market], [null, null, null], 'Lücken stehen als null im Protokoll');
   assert.match(entry.analysisNote, /KI-Analyse nicht verfügbar/);
+  assert.equal(entry.cluster.otherInsiders, 0, 'die Datenbank ist von dem Ausfall nicht betroffen');
+});
+
+test('Verkauf nach einem gemeldeten Kauf ohne gesendete Order: keine Warnung', async () => {
+  // DOWN wurde im vorigen Szenario gemeldet, aber niemand hat auf "Order senden" getippt.
+  const accessionNo = '0001000000-26-000013';
+  const before = await journal('stats');
+  await emit(streamFiling(accessionNo));
+
+  await waitFor('Verkauf in der Datenbank', async () => (await journal('stats')).withSales > before.withSales);
+  await sleep(4000);
+  assert.equal((await telegram('sendMessage')).length, 0);
+  assert.equal((await journal('events')).some((event) => event.action === 'sell-alert' && event.accessionNo === accessionNo), false);
 });
 
 test('Kennt IBKR keinen Kontrakt, kommt die Analyse ohne Order-Button', async () => {
@@ -296,11 +366,7 @@ test('Die Webhooks nehmen ohne Bridge-Secret nichts an', async () => {
       message: { message_id: 900, date: Math.floor(Date.now() / 1000), chat: { id: CHAT_ID } },
     },
   };
-  const post = (path, headers) => fetch(`http://n8n:5678/webhook/${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...headers },
-    body: JSON.stringify(path === 'order-confirm' ? forged : streamFiling('0001000000-26-000001')),
-  });
+  const post = (path, headers) => webhook(path, path === 'order-confirm' ? forged : streamFiling('0001000000-26-000001'), headers);
 
   assert.equal((await post('order-confirm', {})).status, 403);
   assert.equal((await post('order-confirm', { 'x-bridge-token': 'falsch' })).status, 403);
