@@ -581,6 +581,17 @@ test('Format_Result warnt bei unvollständiger Bracket-Order und meldet Ablehnun
 
 // ------------------------------------------------- Konsistenz der Dateien
 
+test('docker-compose.yml läuft auf dem Mac und lässt sich in Safari öffnen', () => {
+  const compose = fs.readFileSync(path.join(ROOT, 'docker-compose.yml'), 'utf8');
+  // Mit Secure-Cookie zeigt n8n Safari auf http://localhost nur eine Fehlerseite.
+  assert.match(compose, /^ {6}N8N_SECURE_COOKIE: "false"$/m);
+  // Vertretbar nur, weil n8n ausschließlich vom eigenen Rechner aus erreichbar ist.
+  assert.match(compose, /^ {6}- "127\.0\.0\.1:5678:5678"$/m);
+  assert.equal((compose.match(/^ {6}- "[^"]*:\d+:\d+"$/gm) || []).length, 1, 'kein weiterer Port nach außen');
+  // macOS belegt Port 5000 für den AirPlay-Empfänger.
+  assert.doesNotMatch(compose, /:5000:5000/);
+});
+
 test('Workflow, Bridge und init.sh passen zusammen', () => {
   const names = new Set(workflow.nodes.map((n) => n.name));
 
