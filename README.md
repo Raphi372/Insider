@@ -40,11 +40,11 @@ Fällt eine Datenquelle aus (Yahoo, 13F, Historie, Claude, die Datenbank), kommt
 
 | Dienst | Wofür | Hinweis |
 |---|---|---|
-| [Docker Desktop](https://www.docker.com/) | führt alles aus | Node.js und `npx n8n` werden nicht gebraucht |
-| [sec-api.io](https://sec-api.io/pricing) | Stream, Form 4, 13F | Tarif „Personal & Startups“; vor dem Buchen prüfen, dass er die Stream-API enthält |
-| [Anthropic Console](https://console.anthropic.com/) | Claude | API-Key und etwas Prepaid-Guthaben |
+| [Docker Desktop](https://www.docker.com/) | führt alles aus | Node.js und `npx n8n` werden nicht gebraucht. Läuft auf Macs mit Apple-Chip und mit Intel |
+| [sec-api.io](https://sec-api.io/pricing) | Stream, Form 4, 13F | Zum Ausprobieren genügt der kostenlose Schlüssel (100 Abrufe insgesamt, ohne Stream). Für den Dauerbetrieb braucht es den Tarif „Personal & Startups“, der die Stream-API enthält |
+| [Claude Console](https://platform.claude.com/) | Claude | API-Key und etwas Prepaid-Guthaben |
 | [Telegram](https://telegram.org/) | Benachrichtigung | Bot über @BotFather, eigene ID über @userinfobot |
-| [Interactive Brokers](https://www.interactivebrokers.eu/) | Paper-Trading | Paper-Konto aktivieren; Kontonummer beginnt mit `D` (z. B. `DU1234567`) |
+| [Interactive Brokers](https://www.interactivebrokers.eu/) | Paper-Trading | Paper-Konto aktivieren; Kontonummer beginnt mit `D` (z. B. `DU1234567`). Die Schnittstelle für Orders verlangt laut IBKR auch dafür ein vollständig eröffnetes und eingezahltes Live-Konto vom Typ „IBKR Pro“. Ohne IBKR läuft alles außer dem Order-Button |
 
 ## Einrichtung
 
@@ -66,13 +66,13 @@ Fällt eine Datenquelle aus (Yahoo, 13F, Historie, Claude, die Datenbank), kommt
 
    Der erste Start lädt rund 4 GB an Images. Dabei legt ein Hilfscontainer (`n8n-init`) deine Schlüssel als verschlüsselte n8n-Credentials an, importiert den Workflow und veröffentlicht ihn.
 
-4. **n8n öffnen:** <http://localhost:5678> – beim ersten Aufruf legst du ein lokales Admin-Konto an. Der Workflow „Insider Pipeline“ ist bereits vorhanden und steht auf „Published“.
+4. **n8n öffnen:** <http://localhost:5678> (auch in Safari) – beim ersten Aufruf legst du ein lokales Admin-Konto an. Der Workflow „Insider Pipeline“ ist bereits vorhanden und steht auf „Published“.
 
 5. **Prüfen, ob alles verbunden ist**
 
    ```bash
    docker compose logs bridge        # erwartet: "sec-api-Stream verbunden"
-   docker compose logs ibkr-gateway  # erwartet: Sitzung "authenticated=True"
+   docker compose logs ibkr-gateway  # erwartet: "Gateway running and authenticated"
    ```
 
 6. **Datenbank vorfüllen** (empfohlen), damit Cluster-Käufe vom ersten Tag an erkannt werden:
@@ -315,9 +315,9 @@ docker compose down               # stoppen (Daten bleiben im Volume n8n_data)
 
 | Posten | Kosten |
 |---|---|
-| sec-api.io „Personal & Startups“ | 55 USD/Monat (49 USD bei jährlicher Zahlung) |
+| sec-api.io „Personal & Startups“ | 55 USD/Monat (49 USD bei jährlicher Zahlung); zum Ausprobieren 100 Abrufe kostenlos – ein Testlauf mit `replay.js` braucht etwa vier |
 | Anthropic, Claude Haiku 5.5 | 0,10 USD je Mio. Eingabe- und 0,50 USD je Mio. Ausgabe-Tokens; pro Analyse unter 0,001 USD, bei 500 Analysen im Monat unter 0,50 USD |
-| Yahoo Finance, Telegram, n8n, IBKR-Paper-Konto | kostenlos |
+| Yahoo Finance, Telegram, n8n, IBKR-Paper-Konto | kostenlos (für das Paper-Konto muss das IBKR-Live-Konto eingezahlt sein) |
 
 Die Preise ändern sich; maßgeblich sind die Preisseiten der Anbieter.
 

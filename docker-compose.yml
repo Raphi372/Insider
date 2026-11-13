@@ -45,6 +45,10 @@ services:
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
       # IPv4 genügt und funktioniert auch auf Hosts ohne IPv6.
       N8N_LISTEN_ADDRESS: 0.0.0.0
+      # n8n ist nur vom eigenen Rechner aus erreichbar (Port oben) und läuft
+      # ohne HTTPS. Mit dem Standardwert zeigt n8n in Safari statt der
+      # Anmeldung nur eine Fehlerseite.
+      N8N_SECURE_COOKIE: "false"
       # Ausführungsprotokolle nach 7 Tagen löschen (13F-Antworten sind groß).
       EXECUTIONS_DATA_PRUNE: "true"
       EXECUTIONS_DATA_MAX_AGE: "168"
@@ -150,8 +154,8 @@ services:
     environment:
       IBEAM_ACCOUNT: ${IBEAM_ACCOUNT:-}
       IBEAM_PASSWORD: ${IBEAM_PASSWORD:-}
-    ports:
-      - "127.0.0.1:5000:5000"
+    # Kein Port nach außen: n8n erreicht das Gateway im Docker-Netz. Auf dem
+    # Mac ist Port 5000 außerdem vom AirPlay-Empfänger belegt.
     volumes:
       - ./ibkr/conf.yaml:/srv/inputs/conf.yaml:ro
 
