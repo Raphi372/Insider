@@ -499,7 +499,7 @@ test('Parse_Callback sendet nie an ein Konto, das kein Paper-Konto ist', async (
     assert.equal(result.orderBody, undefined);
     assert.match(result.text, /kein Paper-Konto/);
   }
-  for (const account of ['DU1234567', 'DF7654321', ' DU1234567 ']) {
+  for (const account of ['DU1234567', 'DF7654321', ' DU1234567 ', 'DUR123456']) {
     assert.equal((await callback(VALID, { cfg: { ibkrAccountId: account } })).action, 'order', `Konto "${account}"`);
   }
 });
