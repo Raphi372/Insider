@@ -1039,8 +1039,8 @@ async function financing({ extract = EXTRACT, context = CONTEXT, market = PIPE_M
   const nodes = { Config: config(cfg), Parse_Form4: [parsed], Build_Market: [{ market }], SEC_Kontext: [context] };
   if (!skipExtraction) {
     const [prepared] = await run('Build_Extraction', { input: [context], nodes: { Config: config(), Parse_Form4: [parsed] } });
-    const answer = Object.fromEntries(prepared.fields.map((key) => [key, { gefunden: false, wert: '', zitat: '', dokument: 0 }]));
-    for (const [key, [wert, zitat, dokument = 1]] of Object.entries(extract)) answer[key] = { gefunden: true, wert, zitat, dokument };
+    // Wie das Modell antwortet: eine Liste "angaben", nur mit den gefundenen Feldern.
+    const answer = { angaben: Object.entries(extract).map(([feld, [wert, zitat, dokument = 1]]) => ({ feld, wert, zitat, dokument })) };
     nodes.Build_Extraction = [prepared];
     nodes.LLM_Finanzierung = llm || llmAnswer(answer);
   }
@@ -1123,15 +1123,16 @@ test('Build_Extraction fragt alle Vertragsfelder mit Zitat und Dokumentnummer ab
   assert.deepEqual(Object.keys(llmRequest).sort(), ['max_tokens', 'messages', 'model', 'output_config', 'system'], 'keine Parameter, die die API ablehnt');
   assert.equal(llmRequest.messages.at(-1).role, 'user');
 
+  // Eine flache Liste mit einem einzigen Eintragstyp statt 25 verschachtelter Objekte: Zu
+  // umfangreiche Schemas lehnt die API mit HTTP 400 ab ("Schema is too complex for compilation").
   const { schema } = llmRequest.output_config.format;
-  assert.equal(schema.additionalProperties, false);
-  assert.deepEqual(schema.required, fields);
+  assert.deepEqual([schema.required, schema.additionalProperties], [['angaben'], false]);
+  const item = schema.properties.angaben.items;
+  assert.deepEqual([item.required, item.additionalProperties], [['feld', 'wert', 'zitat', 'dokument'], false]);
+  assert.deepEqual(item.properties.feld.enum, fields);
   for (const key of ['exchangeCapProzent', 'warrantAusuebungspreis', 'resetBedingung', 'wandlungZeitpunkt', 'fusionZweck', 'closingDatum']) assert.ok(fields.includes(key), key);
-  for (const key of fields) {
-    assert.deepEqual(schema.properties[key].required, ['gefunden', 'wert', 'zitat', 'dokument']);
-    assert.equal(schema.properties[key].additionalProperties, false);
-  }
-  assert.doesNotMatch(JSON.stringify(schema), /minimum|maximum|minLength|maxLength|pattern|"null"/, 'nur Schema-Elemente, die strukturierte Ausgaben kennen');
+  assert.doesNotMatch(JSON.stringify(schema), /minimum|maximum|minLength|maxLength|pattern|"null"|anyOf/, 'nur Schema-Elemente, die strukturierte Ausgaben kennen, ohne optionale oder Vereinigungstypen');
+  assert.ok(JSON.stringify(schema).length < 1500, `Schema klein halten (${JSON.stringify(schema).length} Zeichen)`);
 
   const { content } = llmRequest.messages[0];
   assert.match(content, /<dokument nr="1" form="8-K" eingereicht="2026-11-12" typ="8-K">\nItem 1\.01/);
@@ -1196,6 +1197,17 @@ test('Build_Financing nennt Gründe, wenn Dokumente, KI oder Kurs fehlen – und
 
   const overloaded = await financing({ llm: [{ error: { message: 'Overloaded', status: 529 } }] });
   assert.deepEqual([overloaded.terms, overloaded.notes], [{}, ['KI: HTTP 529']]);
+
+  // n8n meldet API-Fehler mit einem allgemeinen Text; der eigentliche Grund steht in "description".
+  const generic = 'Bad request - please check your parameters';
+  const tooComplex = '{"type":"error","error":{"type":"invalid_request_error","message":"Schema is too complex for compilation."}}';
+  assert.deepEqual((await financing({ llm: [{ error: { message: generic, description: tooComplex, httpCode: '400' } }] })).notes,
+    ['KI: HTTP 400 – Schema is too complex for compilation.']);
+  assert.deepEqual((await financing({ llm: [{ error: { message: generic, description: 'messages.0.content: invalid' } }] })).notes,
+    ['KI: messages.0.content: invalid']);
+  assert.deepEqual((await financing({ llm: [{ error: { message: `400 - ${JSON.stringify(tooComplex)}` } }] })).notes,
+    ['KI: HTTP 400 – Schema is too complex for compilation.'], 'ältere Fehlerform von n8n');
+  assert.deepEqual((await financing({ llm: [{ error: { message: generic } }] })).notes, [`KI: ${generic}`]);
   const cut = await financing({ llm: llmAnswer('{"angebotsart": {"gefunden": tr', 'max_tokens') });
   assert.deepEqual(cut.notes, ['KI: Antwort abgeschnitten']);
 
@@ -1209,6 +1221,41 @@ test('Build_Financing nennt Gründe, wenn Dokumente, KI oder Kurs fehlen – und
     { title: 'Pre-Funded Warrants', acquiredDisposed: 'A', amount: 1000, price: 0, exercisePrice: 0.0001, expirationDate: null, underlyingShares: 1000 },
   ] } });
   assert.equal(prefunded.warrants, null);
+});
+
+test('Build_Financing zählt nur die mitgekauften Warrants – geänderte ältere Papiere nicht', async () => {
+  // Wie bei NXGL: neue Warrants zu 10 $ aus den Units (Code P) und dazu geänderte Altpapiere –
+  // Warrants von 16 auf 13 $ und eine Wandelanleihe auf 5,50 $ (Code J).
+  const base = await pipeSignal();
+  const old = (title, acquiredDisposed, exercisePrice, shares) => ({
+    title, date: '2026-11-10', code: 'J', acquiredDisposed, amount: shares, price: 0, exercisePrice,
+    exerciseDate: null, expirationDate: '2030-06-30', underlyingTitle: 'Common Stock', underlyingShares: shares, ownership: 'I',
+  });
+  const derivatives = [
+    { ...base.derivatives[0], exercisePrice: 10 },
+    old('Warrants (right to buy)', 'D', 16, 400000),
+    old('Warrants (right to buy)', 'A', 13, 400000),
+    old('Convertible Promissory Note', 'A', 5.5, 1180000),
+  ];
+  const f = await financing({ signal: { ...base, derivatives }, context: TIMEOUT, skipExtraction: true });
+  assert.deepEqual([f.warrants.count, f.warrants.perShare, f.warrants.exercisePrice, f.warrants.expiration], [133216, 1, 10, '2031-11-10']);
+  assert.ok(f.effectivePrice.low > 0 && f.effectivePrice.high < 5.5, JSON.stringify(f.effectivePrice));
+  assert.deepEqual(f.notes, ['SEC-Dokumente: Zeitüberschreitung']);
+
+  // Nur geänderte Altpapiere, keine gekauften Warrants: keine Rechnung auf falscher Grundlage.
+  const onlyOld = await financing({ signal: { ...base, derivatives: derivatives.slice(1) }, context: TIMEOUT, skipExtraction: true });
+  assert.deepEqual([onlyOld.warrants, onlyOld.effectivePrice], [null, null]);
+  assert.ok(onlyOld.notes.includes('Warrants im Form 4 nur aus Änderungen älterer Papiere'));
+
+  // Fünf Warrants je Aktie gibt es in Units praktisch nicht – keine Rechnung, sondern ein Hinweis.
+  const many = await financing({ signal: { ...base, derivatives: [{ ...base.derivatives[0], underlyingShares: 666080 }] }, context: TIMEOUT, skipExtraction: true });
+  assert.equal(many.effectivePrice, null);
+  assert.ok(many.notes.includes('Warrants je Aktie unplausibel (5)'));
+  const message = await (async () => (await run('Build_Message', {
+    input: contracts('ACME'),
+    nodes: { Config: config(), Build_Prompt: [{ facts: { ...FACTS, financing: many } }], LLM_Analysis: llmAnswer(VERDICT) },
+  }))[0])();
+  assert.ok(!/effektiv ca\. 0,00/.test(message.message), 'keine unsinnigen 0,00 $');
 });
 
 test('Build_Message zeigt Finanzierung und Einordnung einer Privatplatzierung', async () => {
@@ -1229,6 +1276,11 @@ test('Build_Message zeigt Finanzierung und Einordnung einer Privatplatzierung', 
   // Ohne Vertragsangaben steht der Grund da.
   const offline = await message({ facts: { financing: await financing({ context: TIMEOUT, skipExtraction: true }) } });
   assert.match(offline.message, /<b>Finanzierung:<\/b> Privatplatzierung · Warrants zu 6,00 \$ bis 10\.11\.2031 · Vertragsdetails nicht ermittelt: SEC-Dokumente: Zeitüberschreitung\n<b>Einordnung:<\/b> Warrant ca\./);
+
+  // Scheitert nur die Auslese, nennt die Zeile den Grund der API und verlinkt trotzdem die Quelle.
+  const failed = await financing({ llm: [{ error: { message: 'Bad request - please check your parameters', description: 'Schema is too complex for compilation.', httpCode: '400' } }] });
+  const failedMessage = await message({ facts: { financing: failed } });
+  assert.ok(failedMessage.message.includes(`Vertragsdetails nicht ermittelt: KI: HTTP 400 – Schema is too complex for compilation. · Quelle: <a href="${INDEX_URL}">8-K vom 12.11.2026</a>\n`), failedMessage.message);
 
   // Kein Hinweis auf eine Kapitalmaßnahme: keine Zeile.
   const plain = await message();

@@ -82,7 +82,8 @@ function htmlToText(html) {
 }
 
 function safeChar(code) {
-  if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff) return ' ';
+  // Einzelne Surrogate (aus fehlerhaften Entitäten) wären kein gültiges Unicode – die API lehnte sie ab.
+  if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return ' ';
   return code === 160 ? ' ' : String.fromCodePoint(code);
 }
 

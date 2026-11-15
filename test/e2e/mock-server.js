@@ -176,7 +176,7 @@ function handleAnthropic(req, res, url, body) {
   }
   // Auslese von Vertragsbedingungen (Node Build_Extraction) – erkennbar am Schema.
   const schema = (((body || {}).output_config || {}).format || {}).schema || {};
-  if (schema.properties && schema.properties.exchangeCapProzent) {
+  if (schema.properties && schema.properties.angaben) {
     return send(res, 200, {
       id: 'msg_e2e_extract',
       type: 'message',
