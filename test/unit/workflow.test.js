@@ -127,6 +127,10 @@ test('Parse_Form4 liefert für Filings ohne Kauf null Lose – der Kauf-Filter v
 
 test('Parse_Form4 im Workflow und parseForm4 im Research-Paket liefern dasselbe', async () => {
   const { parseForm4 } = require(path.join(ROOT, 'research/src/form4.js'));
+  // Handelsplan nach Rule 10b5-1 nur über das Kästchen im Formular, ohne passende Fußnote.
+  const affirmedPlan = form4([tx('S', 4000, 12, 21000)], {
+    aff10b5One: true, footnotes: [{ id: 'F1', text: 'The price reported is a weighted average price.' }],
+  });
   const documents = [
     form4([tx('M', 9000, 0, 30000), tx('P', 3000, 10.0, 23000), tx('P', 2000, 10.5, 25000), tx('S', 4000, 12, 21000)]),
     form4([tx('P', 1000, 5, 11000, 'D'), tx('P', 4000, 5, 4000, 'I', 'By Trust')]),
@@ -134,12 +138,17 @@ test('Parse_Form4 im Workflow und parseForm4 im Research-Paket liefern dasselbe'
     form4([tx('S', 4000, 12, 21000)]),
     form4([tx('P', 2000, 3, 2000)], { issuer: { cik: '7', name: 'X', tradingSymbol: 'none' } }),
     form4([tx('P', 2000, 3, 2000)], { reportingOwner: { cik: '9', name: 'Fund LP', relationship: { isTenPercentOwner: true, isOther: true, otherText: 'Member of group' } } }),
+    affirmedPlan,
     { accessionNo: 'leer' },
   ];
   for (const document of documents) {
     const [fromWorkflow] = await run('Parse_Form4', { input: [{ transactions: [document] }] });
     assert.deepEqual(fromWorkflow, parseForm4(document));
   }
+
+  // Gleichheit allein bewiese nichts, wenn beide das Kästchen übersähen.
+  const [affirmed] = await run('Parse_Form4', { input: [{ transactions: [affirmedPlan] }] });
+  assert.deepEqual([affirmed.mentions10b51, affirmed.tradingPlan10b51Affirmed], [true, true]);
 });
 
 // ------------------------------------------------- Kauf-Filter (IF-Nodes)
