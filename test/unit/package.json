@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "description": "Damit \"node --test test/unit/\" auch mit Node.js 22 läuft: Dort wird das Verzeichnis wie ein Modul aufgelöst.",
+  "main": "workflow.test.js"
+}

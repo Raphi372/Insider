@@ -3,6 +3,8 @@
 // Mock aller externen Dienste für den End-to-End-Test:
 //   /stream          sec-api.io Stream (WebSocket)
 //   /sec/...         sec-api.io REST (Insider-Trading, 13F-Holdings)
+//   /finnhub/...     Finnhub (Kurs, Unternehmensprofil, Kennzahlen)
+//   /secdata/...     SEC data.sec.gov (ausstehende Aktien)
 //   /yahoo...        Yahoo Finance (Cookie, Crumb, quoteSummary)
 //   /anthropic/...   Anthropic Messages API
 //   /telegram/...    Telegram Bot API
@@ -116,6 +118,31 @@ function handleYahoo(req, res, url) {
   return send(res, 404, 'not found');
 }
 
+// ----------------------------------------------------------------- Finnhub
+function handleFinnhub(req, res, url) {
+  // Wie bei Finnhub: gedrosselte und fehlerhafte Antworten tragen eine Meldung im Feld "error".
+  if (state.behavior.finnhubStatus) {
+    return send(res, state.behavior.finnhubStatus, { error: 'API limit reached. Please try again later. Remaining Limit: 0' });
+  }
+  // Der Schlüssel muss als Header kommen – in der URL hätte er nichts verloren.
+  if (req.headers['x-finnhub-token'] !== 'e2e-finnhub-key') return send(res, 401, { error: 'Invalid API key' });
+  const symbol = url.searchParams.get('symbol');
+  const path = url.pathname.replace(/^\/finnhub/, '');
+  if (path === '/quote') return send(res, 200, fixtures.finnhubQuote(symbol));
+  if (path === '/stock/profile2') return send(res, 200, fixtures.finnhubProfile(symbol));
+  if (path === '/stock/metric') return send(res, 200, fixtures.finnhubMetric(symbol));
+  return send(res, 404, { error: 'not found' });
+}
+
+// ------------------------------------------------- SEC (data.sec.gov, XBRL)
+function handleSecData(req, res, url) {
+  // Wie die SEC: ohne Kennung im User-Agent kein Zugriff.
+  if (!String(req.headers['user-agent'] || '').trim()) return send(res, 403, 'Forbidden');
+  const match = url.pathname.match(/^\/secdata\/api\/xbrl\/companyconcept\/CIK(\d{10})\/dei\/EntityCommonStockSharesOutstanding\.json$/);
+  const data = match ? fixtures.secShares(match[1]) : null;
+  return data ? send(res, 200, data) : send(res, 404, 'NoSuchKey');
+}
+
 // -------------------------------------------------------------- Anthropic
 function handleAnthropic(req, res, url, body) {
   if (url.pathname !== '/anthropic/v1/messages') return send(res, 404, { error: 'not found' });
@@ -176,7 +203,7 @@ function handleIbkr(req, res, url, body) {
 
   if (path === '/v1/api/trsrv/stocks') {
     const symbol = url.searchParams.get('symbols');
-    const known = { ACME: 111, LATE: 222, DOWN: 333, REJ: 444, PRCY: 555 };
+    const known = { ACME: 111, LATE: 222, DOWN: 333, REJ: 444, PRCY: 555, FBCK: 666, CALC: 777 };
     const listings = known[symbol]
       ? [{ name: `${symbol} CORP`, chineseName: null, assetClass: 'STK', contracts: [
         { conid: 9000 + known[symbol], exchange: 'MEXI', isUS: false },
@@ -279,6 +306,8 @@ const server = http.createServer((req, res) => {
       if (service === '__control') return handleControl(req, res, url, body, wss);
       if (service === 'sec') return handleSec(req, res, url, body);
       if (service === 'yahoo') return handleYahoo(req, res, url);
+      if (service === 'finnhub') return handleFinnhub(req, res, url);
+      if (service === 'secdata') return handleSecData(req, res, url);
       if (service === 'anthropic') return handleAnthropic(req, res, url, body);
       if (service === 'telegram') return await handleTelegram(req, res, url, body);
       if (service === 'ibkr') return handleIbkr(req, res, url, body);

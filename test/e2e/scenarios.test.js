@@ -34,8 +34,8 @@ test('Insiderkauf: Analyse per Telegram, Order erst nach Klick auf den Button', 
   assert.match(text, /<b>Kauf:<\/b> 5\.000 Aktien zu Ø 10,20 \$ = 51\.000 \$/);
   assert.match(text, /<b>Bestand danach:<\/b> 25\.000 Aktien \(\+25,0 %\)/);
   assert.match(text, /<b>Cluster:<\/b> kein weiterer Insiderkauf in den 14 Tagen davor \(Datenbank reicht weniger als einen Tag zurück\)/, 'die Datenbank ist noch leer – das steht dabei');
-  assert.match(text, /Kurs 12,00 \$ \(\+17,6 % ggü\. Insiderpreis\) · Marktkap\. 1,50 Mrd\. \$/);
-  assert.match(text, /KGV 18,4 · Short Interest 7,5 % des Floats/);
+  assert.match(text, /<b>Markt:<\/b> Kurs 12,00 \$ \(\+17,6 % ggü\. Insiderpreis\) · Marktkap\. 1,50 Mrd\. \$ · Finnhub, 10\.11\. 22:00\n/, 'Quelle und Zeitpunkt des Kurses in deutscher Zeit');
+  assert.match(text, /<b>Kennzahlen:<\/b> KGV 18,4\n/, 'Short Interest liefert Finnhub nicht – der Eintrag entfällt');
   assert.match(text, /<b>Historie:<\/b> 1 frühere Käufe, 1 Verkäufe · 1 von 1 Käufen heute im Plus \(Ø \+50,0 %/);
   assert.match(text, /<b>13F-Halter:<\/b> Alpha Capital \(120\.000 Stück, 2025-12-31\); Beta Partners \(30\.000 Stück, 2025-12-31\)/);
   assert.match(text, /Die CFO stockt ihren Bestand um ein Viertel auf &lt;ohne&gt; Verkaufsdruck\./);
@@ -57,11 +57,16 @@ test('Insiderkauf: Analyse per Telegram, Order erst nach Klick auf den Button', 
   ]);
   assert.ok(sec.every((r) => r.query.token === 'e2e-sec-key'));
 
-  // -- Yahoo: Cookie -> Crumb -> quoteSummary
-  const yahoo = await requests('yahoo');
-  assert.deepEqual(yahoo.map((r) => r.path), ['/yahoo-cookie', '/yahoo/v1/test/getcrumb', '/yahoo/v10/finance/quoteSummary/ACME']);
-  assert.equal(yahoo[2].query.crumb, 'CRUMB-123');
-  assert.equal(yahoo[2].headers.cookie, 'A3=e2e-cookie; B=other');
+  // -- Marktdaten: Finnhub (Kurs, Profil, Kennzahlen); der Schlüssel reist als Header, nie in der URL
+  const finnhub = await requests('finnhub');
+  assert.deepEqual(finnhub.map((r) => `${r.path} ${JSON.stringify(r.query)}`), [
+    '/finnhub/quote {"symbol":"ACME"}',
+    '/finnhub/stock/profile2 {"symbol":"ACME"}',
+    '/finnhub/stock/metric {"symbol":"ACME","metric":"all"}',
+  ]);
+  assert.ok(finnhub.every((r) => r.headers['x-finnhub-token'] === 'e2e-finnhub-key'));
+  assert.equal((await requests('yahoo')).length, 0, 'liefert Finnhub, wird Yahoo nicht gefragt');
+  assert.equal((await requests('secdata')).length, 0, 'die Aktienzahl der SEC wird nur gebraucht, wenn die Marktkapitalisierung fehlt');
 
   // -- Anthropic: aktuelles Modell, keine Sampling-Parameter, JSON-Schema
   const [llm] = await requests('anthropic');
@@ -93,7 +98,12 @@ test('Insiderkauf: Analyse per Telegram, Order erst nach Klick auf den Button', 
   assert.equal(entry.form4.ticker, 'ACME');
   assert.equal(entry.form4.purchase.shares, 5000);
   assert.equal(entry.form4.insiderCik, '2000001');
-  assert.equal(entry.market.price, 12);
+  assert.deepEqual(entry.market, {
+    price: 12, marketCap: 1500000000, trailingPE: 18.4, forwardPE: null, fiftyTwoWeekLow: 7.5, fiftyTwoWeekHigh: 14.2,
+    shortPercentOfFloat: null, shortRatioDays: null, heldByInstitutionsPct: null,
+    source: 'Finnhub', asOf: '2026-11-10T21:00:00.000Z', marketCapBasis: null,
+  });
+  assert.deepEqual(entry.marketSources, [{ source: 'Finnhub', ok: true, reason: null }]);
   assert.equal(entry.history.priorPurchases, 1);
   assert.deepEqual(entry.cluster, { windowDays: 14, otherInsiders: 0, insidersWithSamePurchase: 0, totalValueUsd: 0, purchases: [], historyDays: 0, complete: false });
   assert.deepEqual(entry.order, { ticker: 'ACME', conid: 111, quantity: 490, entry: 10.2, stopLoss: 9.38, takeProfit: 11.73 });
@@ -249,14 +259,65 @@ test('Wenige teure Aktien: Es zählt der Kaufwert, nicht die Stückzahl', async 
   assert.equal((await loggedSignal('0001000000-26-000011')).form4.purchase.value, 270000);
 });
 
-test('Fallen Yahoo und Anthropic aus, kommt die Meldung trotzdem – ohne KI-Einstufung', async () => {
-  await control('behavior', { yahooDown: true, anthropicStatus: 500 });
+test('Drosselt Finnhub (HTTP 429), springt Yahoo ein', async () => {
+  await control('behavior', { finnhubStatus: 429 });
+  await emit(streamFiling('0001000000-26-000014'));
+
+  const [message] = await waitForMessages(1);
+  const { text } = message.body;
+  assert.match(text, /<b>Insiderkauf FBCK<\/b>/);
+  assert.match(text, /<b>Markt:<\/b> Kurs 12,00 \$ \(\+17,6 % ggü\. Insiderpreis\) · Marktkap\. 1,50 Mrd\. \$ · Yahoo, 10\.11\. 22:00\n/);
+  assert.match(text, /<b>Kennzahlen:<\/b> KGV 18,4 · Short Interest 7,5 % des Floats\n/);
+
+  // Finnhub: ein Versuch und genau eine Wiederholung nach kurzer Pause, dann ist Schluss.
+  const finnhub = await requests('finnhub');
+  assert.deepEqual(finnhub.map((r) => r.path), ['/finnhub/quote', '/finnhub/quote']);
+
+  // Yahoo: Cookie -> Crumb -> quoteSummary
+  const yahoo = await requests('yahoo');
+  assert.deepEqual(yahoo.map((r) => r.path), ['/yahoo-cookie', '/yahoo/v1/test/getcrumb', '/yahoo/v10/finance/quoteSummary/FBCK']);
+  assert.equal(yahoo[2].query.crumb, 'CRUMB-123');
+  assert.equal(yahoo[2].headers.cookie, 'A3=e2e-cookie; B=other');
+
+  const entry = await loggedSignal('0001000000-26-000014');
+  assert.deepEqual([entry.market.source, entry.market.price, entry.market.shortPercentOfFloat, entry.market.asOf], ['Yahoo', 12, 7.5, '2026-11-10T21:00:00.000Z']);
+  assert.deepEqual(entry.marketSources, [
+    { source: 'Finnhub', ok: false, reason: 'HTTP 429' },
+    { source: 'Yahoo', ok: true, reason: null },
+  ]);
+});
+
+test('Hat Finnhub kein Unternehmensprofil, wird die Marktkapitalisierung aus der Aktienzahl der SEC berechnet', async () => {
+  await emit(streamFiling('0001000000-26-000015'));
+
+  const [message] = await waitForMessages(1);
+  assert.match(message.body.text, /<b>Insiderkauf CALC<\/b>/);
+  assert.match(
+    message.body.text,
+    /<b>Markt:<\/b> Kurs 12,00 \$ \(\+17,6 % ggü\. Insiderpreis\) · Marktkap\. ca\. 1,44 Mrd\. \$ \(berechnet: Kurs × 120,0 Mio\. Aktien lt\. SEC, Stand 30\.09\.2026\) · Finnhub, 10\.11\. 22:00\n/,
+  );
+
+  // Abgefragt wird die Aktienzahl dieses Unternehmens – mit einer Kennung, wie die SEC sie verlangt.
+  const [shares] = await requests('secdata');
+  assert.equal(shares.path, '/secdata/api/xbrl/companyconcept/CIK0001000015/dei/EntityCommonStockSharesOutstanding.json');
+  assert.equal(shares.headers['user-agent'], 'insider-pipeline/1.0');
+  assert.equal((await requests('yahoo')).length, 0);
+
+  const entry = await loggedSignal('0001000000-26-000015');
+  assert.equal(entry.market.marketCap, 1440000000);
+  assert.deepEqual(entry.market.marketCapBasis, { sharesOutstanding: 120000000, asOf: '2026-09-30', source: 'SEC' });
+  assert.equal(entry.derived.purchaseValuePctOfMarketCap, 0.0035);
+});
+
+test('Fallen alle Kursquellen und Anthropic aus, kommt die Meldung trotzdem – mit dem Grund und ohne KI-Einstufung', async () => {
+  await control('behavior', { finnhubStatus: 429, yahooDown: true, anthropicStatus: 500 });
   await emit(streamFiling('0001000000-26-000006'));
 
   const [message] = await waitForMessages(1, 90000);
   const { text } = message.body;
   assert.match(text, /ℹ️ <b>Insiderkauf DOWN<\/b> – ohne KI-Einstufung/);
-  assert.match(text, /<b>Markt:<\/b> Marktdaten nicht verfügbar/);
+  assert.match(text, /<b>Markt:<\/b> Marktdaten nicht verfügbar \(Finnhub: HTTP 429 · Yahoo: HTTP 503\)\n/);
+  assert.equal((await requests('secdata')).length, 0, 'ohne Kurs gibt es nichts zu berechnen');
   assert.match(text, /<b>Historie:<\/b> 1 frühere Käufe, 1 Verkäufe$/m, 'ohne Kurs keine Erfolgsquote');
   assert.match(text, /⚠️ KI-Analyse nicht verfügbar/);
   assert.equal(buttons(message)[0].callback_data, 'o|DOWN|333|490|10.2|9.38|11.73');
@@ -264,6 +325,10 @@ test('Fallen Yahoo und Anthropic aus, kommt die Meldung trotzdem – ohne KI-Ein
 
   const entry = await loggedSignal('0001000000-26-000006');
   assert.deepEqual([entry.rating, entry.analysis, entry.market], [null, null, null], 'Lücken stehen als null im Protokoll');
+  assert.deepEqual(entry.marketSources, [
+    { source: 'Finnhub', ok: false, reason: 'HTTP 429' },
+    { source: 'Yahoo', ok: false, reason: 'HTTP 503' },
+  ]);
   assert.match(entry.analysisNote, /KI-Analyse nicht verfügbar/);
   assert.equal(entry.cluster.otherInsiders, 0, 'die Datenbank ist von dem Ausfall nicht betroffen');
 });

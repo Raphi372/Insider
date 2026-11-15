@@ -27,11 +27,16 @@ const node = (name) => {
 async function run(name, { input = [{}], nodes = {} } = {}) {
   const wrap = (items) => items.map((json) => ({ json }));
   const $input = { first: () => wrap(input)[0], all: () => wrap(input) };
+  // Wie in n8n: Ein nicht ausgeführter Node meldet isExecuted === false, und
+  // der Zugriff auf seine Daten wirft einen Fehler.
   const $ = (nodeName) => {
-    if (!(nodeName in nodes)) throw new Error(`Node "${nodeName}" wurde nicht ausgeführt`);
-    const value = nodes[nodeName];
-    const items = (branch, runIndex) => wrap(typeof value === 'function' ? value(branch, runIndex) : value);
-    return { first: (b, r) => items(b, r)[0], all: (b, r) => items(b, r) };
+    const isExecuted = nodeName in nodes;
+    const items = (branch, runIndex) => {
+      if (!isExecuted) throw new Error(`Node "${nodeName}" wurde nicht ausgeführt`);
+      const value = nodes[nodeName];
+      return wrap(typeof value === 'function' ? value(branch, runIndex) : value);
+    };
+    return { isExecuted, first: (b, r) => items(b, r)[0], all: (b, r) => items(b, r) };
   };
   const output = await new AsyncFunction('$input', '$', node(name).parameters.jsCode)($input, $);
   return output.map((item) => item.json);
@@ -40,6 +45,7 @@ async function run(name, { input = [{}], nodes = {} } = {}) {
 const CFG = {
   minPurchaseValueUsd: 25000, orderBudgetUsd: 5000, orderQuantity: 0, stopLossPct: 8, takeProfitPct: 15,
   orderMaxAgeHours: 24, telegramChatId: '4242', ibkrAccountId: 'DU1234567', model: 'claude-haiku-5-5',
+  finnhubEnabled: true, timeZone: 'Europe/Berlin',
 };
 const config = (overrides = {}) => [{ cfg: { ...CFG, ...overrides } }];
 
@@ -240,15 +246,151 @@ test('Build_Sell_Alert: ohne gesendete Order, mit Handelsplan, Komplettverkauf u
 // ----------------------------------------------------------- Build_Prompt
 
 const SIGNAL = {
-  accessionNo: '0001000000-26-000001', ticker: 'ACME', issuerName: 'ACME Corp', insiderName: 'Doe Jane', role: 'Officer (CEO)',
+  accessionNo: '0001000000-26-000001', ticker: 'ACME', issuerName: 'ACME Corp', issuerCik: '1000001', insiderName: 'Doe Jane', role: 'Officer (CEO)',
   filedAt: '2026-11-10', transactionCodes: ['P'], mentions10b51: false, footnotes: [], link: 'https://www.sec.gov/x',
   purchase: { lots: 1, shares: 5000, value: 51000, avgPrice: 10.2, firstDate: '2026-11-09', lastDate: '2026-11-09', sharesOwnedBefore: 20000, sharesOwnedAfter: 25000, holdingsIncreasePct: 25 },
 };
 const quote = (price = 12) => ({ quoteSummary: { result: [{
-  price: { regularMarketPrice: { raw: price }, marketCap: { raw: 1.5e9 } },
+  price: { regularMarketPrice: { raw: price }, regularMarketTime: 1794344400, marketCap: { raw: 1.5e9 } },
   summaryDetail: { trailingPE: { raw: 18.44 } },
   defaultKeyStatistics: { shortPercentOfFloat: { raw: 0.075 } },
 }] } });
+
+// ----------------------------------------------------------- Build_Market
+
+// Antworten der Quellen, wie n8n sie an den Workflow weitergibt.
+const FINNHUB_QUOTE = { c: 5.12, d: -0.08, dp: -1.54, h: 5.3, l: 5.05, o: 5.2, pc: 5.2, t: 1794690000 };
+const FINNHUB_PROFILE = { country: 'US', currency: 'USD', exchange: 'NASDAQ NMS - GLOBAL MARKET', marketCapitalization: 38.2, name: 'ACME Corp', shareOutstanding: 7.46, ticker: 'ACME' };
+const FINNHUB_METRIC = { metric: { '52WeekHigh': 9.8, '52WeekLow': 3.1, peTTM: 14.237, beta: 1.2 }, metricType: 'all', series: {}, symbol: 'ACME' };
+const YAHOO_COOKIE = { statusCode: 404, headers: { 'set-cookie': ['A3=abc; Path=/'] }, body: '' };
+// Fehler, wie n8n 2.47 sie bei "Continue on Fail" liefert (in einem echten n8n aufgezeichnet).
+const HTTP_429 = { error: { message: "Try spacing your requests out using the batching settings under 'Options'", name: 'AxiosError', code: 'ERR_BAD_REQUEST', status: 429 } };
+const HTTP_500 = { error: { message: '500 - "Internal Server Error"', name: 'AxiosError', code: 'ERR_BAD_RESPONSE', status: 500 } };
+const TIMEOUT = { error: { message: 'timeout of 5000ms exceeded', name: 'AxiosError', code: 'ECONNABORTED' } };
+const DNS_ERROR = { error: { message: 'getaddrinfo ENOTFOUND finnhub.io', name: 'Error', code: 'ENOTFOUND' } };
+
+const finnhubOk = { Finnhub_Quote: [FINNHUB_QUOTE], Finnhub_Profile: [FINNHUB_PROFILE], Finnhub_Metric: [FINNHUB_METRIC] };
+const yahooOk = { Yahoo_Cookie: [YAHOO_COOKIE], Yahoo_Crumb: [{ data: 'crumb' }], Yahoo_Quote: [quote()] };
+const yahooBlocked = { Yahoo_Cookie: [YAHOO_COOKIE], Yahoo_Crumb: [HTTP_429], Yahoo_Quote: [HTTP_429] };
+
+const buildMarket = (sources, { cfg, signal = SIGNAL } = {}) => run('Build_Market', {
+  nodes: { Config: config(cfg), Parse_Form4: [signal], ...sources },
+}).then(([json]) => json);
+
+test('Build_Market liest Kurs, Marktkapitalisierung und Kennzahlen von Finnhub', async () => {
+  const built = await buildMarket(finnhubOk);
+  assert.deepEqual(built.market, {
+    price: 5.12, marketCap: 38200000, trailingPE: 14.24, forwardPE: null, fiftyTwoWeekLow: 3.1, fiftyTwoWeekHigh: 9.8,
+    shortPercentOfFloat: null, shortRatioDays: null, heldByInstitutionsPct: null,
+    source: 'Finnhub', asOf: '2026-11-14T21:00:00.000Z', marketCapBasis: null,
+  }, 'Finnhub nennt die Marktkapitalisierung in Millionen; was es nicht liefert, bleibt null');
+  assert.deepEqual(built.marketSources, [{ source: 'Finnhub', ok: true, reason: null }]);
+  assert.deepEqual([built.needsShares, built.capNotes], [false, []]);
+});
+
+test('Build_Market: Finnhub zuerst, Yahoo nur als Ersatz', async () => {
+  // Beide Quellen haben Daten: Finnhub gewinnt.
+  assert.equal((await buildMarket({ ...finnhubOk, ...yahooOk })).market.source, 'Finnhub');
+
+  // Finnhub kennt das Symbol nicht (lauter Nullen) -> Yahoo.
+  const unknown = await buildMarket({ Finnhub_Quote: [{ c: 0, d: null, dp: null, h: 0, l: 0, o: 0, pc: 0, t: 0 }], ...yahooOk });
+  assert.deepEqual(unknown.marketSources, [
+    { source: 'Finnhub', ok: false, reason: 'kein Kurs für ACME' },
+    { source: 'Yahoo', ok: true, reason: null },
+  ]);
+  assert.deepEqual(
+    [unknown.market.source, unknown.market.price, unknown.market.marketCap, unknown.market.trailingPE, unknown.market.shortPercentOfFloat, unknown.market.asOf],
+    ['Yahoo', 12, 1500000000, 18.44, 7.5, '2026-11-10T21:00:00.000Z'],
+  );
+
+  // Finnhub drosselt -> Yahoo, und der Grund steht dabei.
+  const throttled = await buildMarket({ Finnhub_Quote: [HTTP_429], ...yahooOk });
+  assert.deepEqual(throttled.marketSources[0], { source: 'Finnhub', ok: false, reason: 'HTTP 429' });
+  assert.equal(throttled.market.source, 'Yahoo');
+});
+
+test('Build_Market: ohne Finnhub-Schlüssel läuft alles über Yahoo', async () => {
+  const built = await buildMarket(yahooOk, { cfg: { finnhubEnabled: false } });
+  assert.deepEqual(built.marketSources, [
+    { source: 'Finnhub', ok: false, reason: 'kein Schlüssel' },
+    { source: 'Yahoo', ok: true, reason: null },
+  ]);
+  assert.equal(built.market.source, 'Yahoo');
+
+  // Auch wenn Antworten von Finnhub vorlägen: Ohne Schlüssel zählen sie nicht.
+  assert.equal((await buildMarket({ ...finnhubOk, ...yahooOk }, { cfg: { finnhubEnabled: false } })).market.source, 'Yahoo');
+});
+
+test('Build_Market: Fallen alle Quellen aus, nennt jede ihren Grund', async () => {
+  const reasons = async (sources, cfg) => {
+    const built = await buildMarket(sources, { cfg });
+    assert.equal(built.market, null);
+    assert.equal(built.needsShares, false, 'ohne Kurs gibt es nichts zu berechnen');
+    return built.marketSources.map((source) => `${source.source}: ${source.reason}`).join(' · ');
+  };
+
+  // Der Befund vom 14.11.2026: kein Schlüssel, Yahoo antwortet schon beim Crumb mit 429.
+  assert.equal(await reasons(yahooBlocked, { finnhubEnabled: false }), 'Finnhub: kein Schlüssel · Yahoo: HTTP 429');
+  assert.equal(await reasons({ Finnhub_Quote: [HTTP_500], ...yahooBlocked }), 'Finnhub: HTTP 500 · Yahoo: HTTP 429');
+  assert.equal(await reasons({ Finnhub_Quote: [TIMEOUT], Yahoo_Cookie: [TIMEOUT], Yahoo_Crumb: [TIMEOUT], Yahoo_Quote: [TIMEOUT] }), 'Finnhub: Zeitüberschreitung · Yahoo: Zeitüberschreitung');
+  assert.equal(await reasons({ Finnhub_Quote: [DNS_ERROR], ...yahooBlocked }), 'Finnhub: nicht erreichbar · Yahoo: HTTP 429');
+  assert.equal(await reasons({ Finnhub_Quote: [{ error: 'Credentials not found' }], ...yahooBlocked }), 'Finnhub: Credentials not found · Yahoo: HTTP 429');
+
+  // Yahoo: Einwilligungsseite statt Cookie, Ausfall mit 503, Symbol unbekannt.
+  const noCookie = { Yahoo_Cookie: [{ statusCode: 200, headers: {}, body: '<html>' }], Yahoo_Crumb: [{ data: '' }], Yahoo_Quote: [{ quoteSummary: { result: null, error: { code: 'Not Found' } } }] };
+  assert.equal(await reasons(noCookie, { finnhubEnabled: false }), 'Finnhub: kein Schlüssel · Yahoo: kein Cookie erhalten');
+  const down = { Yahoo_Cookie: [{ statusCode: 503, headers: {}, body: '' }], Yahoo_Crumb: [{ error: { status: 503, message: '503 - "Service Unavailable"' } }], Yahoo_Quote: [{ error: { status: 503 } }] };
+  assert.equal(await reasons(down, { finnhubEnabled: false }), 'Finnhub: kein Schlüssel · Yahoo: HTTP 503');
+  const noSymbol = { ...yahooOk, Yahoo_Quote: [{ quoteSummary: { result: null, error: { code: 'Not Found' } } }] };
+  assert.equal(await reasons(noSymbol, { finnhubEnabled: false }), 'Finnhub: kein Schlüssel · Yahoo: kein Kurs für ACME');
+
+  // Wurde eine Quelle gar nicht gefragt, wird auch das gesagt statt geraten.
+  assert.equal(await reasons({}, { finnhubEnabled: true }), 'Finnhub: nicht abgefragt · Yahoo: nicht abgefragt');
+});
+
+test('Build_Market: Fehlt bei Finnhub die Marktkapitalisierung, wird die Aktienzahl gebraucht', async () => {
+  const withProfile = (profile, metric = FINNHUB_METRIC) => buildMarket({ Finnhub_Quote: [FINNHUB_QUOTE], Finnhub_Profile: [profile], Finnhub_Metric: [metric] });
+
+  // Kein Profil (typisch für sehr kleine Titel): Kurs ja, Marktkapitalisierung über die SEC.
+  const noProfile = await withProfile({});
+  assert.deepEqual([noProfile.market.price, noProfile.market.marketCap, noProfile.needsShares, noProfile.capNotes], [5.12, null, true, ['Finnhub: keine Angabe']]);
+
+  // Profil gedrosselt: der Kurs bleibt, der Grund für die Lücke wird notiert.
+  const throttled = await withProfile(HTTP_429, HTTP_429);
+  assert.deepEqual([throttled.market.price, throttled.market.marketCap, throttled.market.trailingPE, throttled.needsShares, throttled.capNotes], [5.12, null, null, true, ['Finnhub: HTTP 429']]);
+
+  // Nur die Aktienzahl ist da: Marktkapitalisierung = Kurs × Aktien, als berechnet gekennzeichnet.
+  const sharesOnly = await withProfile({ currency: 'USD', shareOutstanding: 7.46 });
+  assert.deepEqual([sharesOnly.market.marketCap, sharesOnly.market.marketCapBasis, sharesOnly.needsShares], [38195200, { sharesOutstanding: 7460000, asOf: null, source: 'Finnhub' }, false]);
+
+  // Berichtet das Unternehmen nicht in US-Dollar, ist die Währung der Angabe unklar: lieber keine Zahl.
+  const foreign = await withProfile({ currency: 'CNY', marketCapitalization: 1800000, shareOutstanding: 2400 });
+  assert.deepEqual([foreign.market.marketCap, foreign.capNotes, foreign.needsShares], [null, ['Finnhub: Angabe in CNY'], true]);
+
+  // Ohne CIK des Emittenten lässt sich bei der SEC nichts nachschlagen.
+  const { issuerCik, ...withoutCik } = SIGNAL;
+  const built = await buildMarket({ Finnhub_Quote: [FINNHUB_QUOTE], Finnhub_Profile: [{}], Finnhub_Metric: [{}] }, { signal: withoutCik });
+  assert.equal(built.needsShares, false);
+});
+
+test('Build_Market fragt Aktienklassen bei Finnhub mit Punkt ab (BRK-B -> BRK.B)', async () => {
+  const built = await buildMarket({ Finnhub_Quote: [{ c: 0, t: 0 }], ...yahooBlocked }, { signal: { ...SIGNAL, ticker: 'BRK-B' } });
+  assert.equal(built.marketSources[0].reason, 'kein Kurs für BRK.B');
+  const symbol = node('Finnhub_Quote').parameters.queryParameters.parameters.find((parameter) => parameter.name === 'symbol').value;
+  assert.equal(new Function('$', `return (${/^=\{\{(.*)\}\}$/s.exec(symbol)[1]});`)(() => ({ first: () => ({ json: { ticker: 'BRK-B' } }) })), 'BRK.B');
+});
+
+test('Marktdaten-Weichen: Finnhub nur mit Schlüssel, Yahoo nur ohne Kurs, SEC nur ohne Marktkapitalisierung', () => {
+  assert.equal(passesIf('Finnhub aktiv?', { nodes: { Config: config({ finnhubEnabled: true }) } }), true);
+  assert.equal(passesIf('Finnhub aktiv?', { nodes: { Config: config({ finnhubEnabled: false }) } }), false);
+
+  assert.equal(passesIf('Finnhub-Kurs?', { json: FINNHUB_QUOTE }), true);
+  assert.equal(passesIf('Finnhub-Kurs?', { json: { c: 0, t: 0 } }), false, 'unbekanntes Symbol');
+  assert.equal(passesIf('Finnhub-Kurs?', { json: HTTP_429 }), false, 'gedrosselt');
+
+  assert.equal(passesIf('Marktkap. fehlt?', { json: { needsShares: true } }), true);
+  assert.equal(passesIf('Marktkap. fehlt?', { json: { needsShares: false } }), false);
+});
 
 const CLUSTER = {
   windowDays: 14, historyDays: 30, otherInsiders: 2, insidersWithSamePurchase: 0, totalValue: 150000,
@@ -260,11 +402,13 @@ const CLUSTER = {
 const STORED = { stored: true, isNew: true, cluster: CLUSTER, sellAlert: null };
 
 test('Build_Prompt berechnet Erfolgsquote, filtert 13F-Positionen und baut eine gültige Anfrage', async () => {
+  const built = await buildMarket(yahooOk, { cfg: { finnhubEnabled: false } });
   const [{ facts, llmRequest }] = await run('Build_Prompt', {
-    input: [quote()],
+    input: [built],
     nodes: {
       Config: config(),
       Parse_Form4: [SIGNAL],
+      Build_Market: [built],
       Store_Filing: [STORED],
       Insider_Historie: [{ transactions: [
         form4([tx('P', 5000, 10.2, 25000)]), // das aktuelle Filing zählt nicht zur Historie
@@ -307,13 +451,60 @@ test('Build_Prompt berechnet Erfolgsquote, filtert 13F-Positionen und baut eine 
   assert.match(llmRequest.messages[0].content, /"cluster": \{\s+"windowDays": 14,\s+"otherInsiders": 2,/, 'der Cluster steht im Faktenblock für das Modell');
   assert.match(llmRequest.system, /"cluster" nennt weitere Insider/);
   assert.match(llmRequest.system, /"sameAsThisPurchase": true.+kein unabhängiger zweiter Käufer/);
+
+  // Quelle und Zeitpunkt des Kurses gehen ans Modell, die Abruf-Diagnose nicht.
+  assert.deepEqual([facts.market.source, facts.market.asOf], ['Yahoo', '2026-11-10T21:00:00.000Z']);
+  assert.deepEqual(facts.marketSources, built.marketSources);
+  assert.match(llmRequest.messages[0].content, /"source": "Yahoo",\s+"asOf": "2026-11-10T21:00:00.000Z"/);
+  assert.ok(!llmRequest.messages[0].content.includes('marketSources'));
+  assert.match(llmRequest.system, /"market\.marketCapBasis" gesetzt.+nur eine Näherung/);
+});
+
+test('Build_Prompt berechnet eine fehlende Marktkapitalisierung aus der Aktienzahl der SEC', async () => {
+  const built = await buildMarket({ Finnhub_Quote: [FINNHUB_QUOTE], Finnhub_Profile: [{}], Finnhub_Metric: [FINNHUB_METRIC] });
+  assert.equal(built.needsShares, true);
+  const fact = (end, val, form, filed) => ({ end, val, accn: 'x', fy: 2026, fp: 'Q3', form, filed });
+  const prompt = async (secResponse, signal = SIGNAL) => {
+    const [{ facts }] = await run('Build_Prompt', {
+      input: [secResponse],
+      nodes: { Config: config(), Parse_Form4: [signal], Build_Market: [built], Store_Filing: [STORED], Insider_Historie: [{}], '13F_Request': [{}] },
+    });
+    return facts;
+  };
+
+  // Jüngster Quartals- oder Jahresbericht zählt; andere Formulare und ältere Stände nicht.
+  const facts = await prompt({ units: { shares: [
+    fact('2026-06-30', 7300000, '10-Q', '2026-08-05'),
+    fact('2026-09-30', 7460000, '10-Q', '2026-11-04'),
+    fact('2026-10-15', 999, 'S-1', '2026-10-20'),
+    fact('2025-12-31', 7100000, '10-K', '2026-03-01'),
+  ] } });
+  assert.equal(facts.market.marketCap, 38195200);
+  assert.deepEqual(facts.market.marketCapBasis, { sharesOutstanding: 7460000, asOf: '2026-09-30', source: 'SEC' });
+  assert.equal(facts.marketCapNote, null);
+  assert.equal(facts.derived.purchaseValuePctOfMarketCap, 0.1335, 'die abgeleiteten Kennzahlen rechnen mit dem berechneten Wert');
+  assert.equal(facts.market.source, 'Finnhub', 'die Quelle des Kurses bleibt');
+
+  // Keine brauchbare Angabe: Die Lücke bleibt, mit Begründung – geschätzt wird nicht.
+  const gap = async (secResponse) => {
+    const result = await prompt(secResponse);
+    assert.deepEqual([result.market.marketCap, result.market.marketCapBasis, result.derived.purchaseValuePctOfMarketCap], [null, null, null]);
+    return result.marketCapNote;
+  };
+  assert.equal(await gap({ error: { status: 404, message: '404 - "NoSuchKey"' } }), 'Finnhub: keine Angabe · SEC: keine Angabe');
+  assert.equal(await gap(HTTP_429), 'Finnhub: keine Angabe · SEC: HTTP 429');
+  assert.equal(await gap(TIMEOUT), 'Finnhub: keine Angabe · SEC: nicht erreichbar');
+  assert.equal(await gap({ units: { shares: [fact('2024-12-31', 7000000, '10-K', '2025-03-01')] } }), 'Finnhub: keine Angabe · SEC: Aktienzahl veraltet (2024-12-31)');
+  assert.equal(await gap({ units: { shares: [fact('2026-09-30', 900000000, '20-F', '2026-10-30')] } }), 'Finnhub: keine Angabe · SEC: keine Angabe', 'ausländische Emittenten: Stammaktien sind nicht das gehandelte Papier');
+  assert.equal(await gap({ units: {} }), 'Finnhub: keine Angabe · SEC: keine Angabe');
 });
 
 test('Build_Prompt: Cluster aus der Datenbank – unvollständige Historie wird gekennzeichnet, ein Ausfall nicht geraten', async () => {
   const cluster = async (stored) => {
+    const built = await buildMarket(finnhubOk);
     const [{ facts }] = await run('Build_Prompt', {
-      input: [quote()],
-      nodes: { Config: config(), Parse_Form4: [{ ...SIGNAL, mentions10b51: true }], Store_Filing: [stored], Insider_Historie: [{}], '13F_Request': [{}] },
+      input: [built],
+      nodes: { Config: config(), Parse_Form4: [{ ...SIGNAL, mentions10b51: true }], Build_Market: [built], Store_Filing: [stored], Insider_Historie: [{}], '13F_Request': [{}] },
     });
     assert.equal(facts.mentions10b51, true);
     return facts.cluster;
@@ -332,11 +523,13 @@ test('Build_Prompt: Cluster aus der Datenbank – unvollständige Historie wird 
 
 test('Build_Prompt kennzeichnet ausgefallene Datenquellen mit null statt mit erfundenen Werten', async () => {
   const failed = [{ error: { message: 'timeout' } }];
+  const built = await buildMarket({ Finnhub_Quote: [TIMEOUT], Yahoo_Cookie: [TIMEOUT], Yahoo_Crumb: [TIMEOUT], Yahoo_Quote: [TIMEOUT] });
   const [{ facts }] = await run('Build_Prompt', {
-    input: failed,
-    nodes: { Config: config(), Parse_Form4: [SIGNAL], Store_Filing: failed, Insider_Historie: failed, '13F_Request': failed },
+    input: [built],
+    nodes: { Config: config(), Parse_Form4: [SIGNAL], Build_Market: [built], Store_Filing: failed, Insider_Historie: failed, '13F_Request': failed },
   });
   assert.equal(facts.market, null);
+  assert.deepEqual(facts.marketSources.map((source) => source.reason), ['Zeitüberschreitung', 'Zeitüberschreitung']);
   assert.equal(facts.history, null);
   assert.equal(facts.institutions, null);
   assert.equal(facts.cluster, null);
@@ -347,7 +540,7 @@ test('Build_Prompt kennzeichnet ausgefallene Datenquellen mit null statt mit erf
 
 const FACTS = {
   ...SIGNAL,
-  market: null, history: null, institutions: null,
+  market: null, marketSources: [], marketCapNote: null, history: null, institutions: null,
   cluster: { windowDays: 14, otherInsiders: 0, insidersWithSamePurchase: 0, totalValueUsd: 0, purchases: [], historyDays: 30, complete: true },
   derived: { purchaseValuePctOfMarketCap: null, currentPriceVsInsiderPricePct: null },
 };
@@ -467,6 +660,63 @@ test('Build_Message nennt Cluster-Käufe und sagt offen, wenn die Datenbank nich
   const unknown = await message({ facts: { cluster: null } });
   assert.match(unknown.message, /<b>Cluster:<\/b> nicht geprüft – Datenbank nicht erreichbar/);
   assert.equal(unknown.hasOrder, true, 'der Order-Vorschlag hängt nicht an der Datenbank');
+});
+
+test('Build_Message: Zeile "Markt" nennt Kurs, Marktkapitalisierung, Quelle und Zeitpunkt', async () => {
+  const MARKET = {
+    price: 5.12, marketCap: 38200000, trailingPE: null, forwardPE: null, fiftyTwoWeekLow: 3.1, fiftyTwoWeekHigh: 9.8,
+    shortPercentOfFloat: null, shortRatioDays: null, heldByInstitutionsPct: null,
+    source: 'Finnhub', asOf: '2026-11-14T20:59:30.000Z', marketCapBasis: null,
+  };
+  const derived = { purchaseValuePctOfMarketCap: 0.1335, currentPriceVsInsiderPricePct: -6.9 };
+  const line = async (market, extra = {}) => {
+    const result = await message({ facts: { market, derived, ...extra.facts }, cfg: extra.cfg });
+    return /<b>Markt:<\/b> ([^\n]*)\n/.exec(result.message)[1];
+  };
+
+  // Zeitpunkt in deiner Zeitzone: 20:59 UTC ist 21:59 in Berlin.
+  assert.equal(await line(MARKET), 'Kurs 5,12 $ (−6,9 % ggü. Insiderpreis) · Marktkap. 38,20 Mio. $ · Finnhub, 14.11. 21:59');
+  assert.equal(await line(MARKET, { cfg: { timeZone: 'America/New_York' } }), 'Kurs 5,12 $ (−6,9 % ggü. Insiderpreis) · Marktkap. 38,20 Mio. $ · Finnhub, 14.11. 15:59');
+  assert.equal(await line(MARKET, { cfg: { timeZone: 'Nicht/Vorhanden' } }), 'Kurs 5,12 $ (−6,9 % ggü. Insiderpreis) · Marktkap. 38,20 Mio. $ · Finnhub, 14.11. 20:59 UTC');
+  assert.equal(await line({ ...MARKET, source: 'Yahoo', asOf: null }), 'Kurs 5,12 $ (−6,9 % ggü. Insiderpreis) · Marktkap. 38,20 Mio. $ · Yahoo');
+
+  // Berechnete Marktkapitalisierung ist als solche gekennzeichnet, mit Stand der Aktienzahl.
+  assert.equal(
+    await line({ ...MARKET, marketCap: 38195200, marketCapBasis: { sharesOutstanding: 7460000, asOf: '2026-09-30', source: 'SEC' } }),
+    'Kurs 5,12 $ (−6,9 % ggü. Insiderpreis) · Marktkap. ca. 38,20 Mio. $ (berechnet: Kurs × 7,5 Mio. Aktien lt. SEC, Stand 30.09.2026) · Finnhub, 14.11. 21:59',
+  );
+  assert.equal(
+    await line({ ...MARKET, marketCap: 6400000000, marketCapBasis: { sharesOutstanding: 1250000000, asOf: null, source: 'Finnhub' } }),
+    'Kurs 5,12 $ (−6,9 % ggü. Insiderpreis) · Marktkap. ca. 6,40 Mrd. $ (berechnet: Kurs × 1,25 Mrd. Aktien lt. Finnhub) · Finnhub, 14.11. 21:59',
+  );
+
+  // Fehlt die Marktkapitalisierung, steht der Grund dabei (und ist HTML-sicher).
+  assert.equal(
+    await line({ ...MARKET, marketCap: null }, { facts: { marketCapNote: 'Finnhub: keine Angabe · SEC: <404>' } }),
+    'Kurs 5,12 $ (−6,9 % ggü. Insiderpreis) · Marktkap. n. v. (Finnhub: keine Angabe · SEC: &lt;404&gt;) · Finnhub, 14.11. 21:59',
+  );
+
+  // Kennzahlen: Short Interest erscheint nur, wenn die Quelle es liefert.
+  const finnhub = await message({ facts: { market: { ...MARKET, trailingPE: 14.24 }, derived } });
+  assert.match(finnhub.message, /<b>Kennzahlen:<\/b> KGV 14,2\n/);
+  const yahoo = await message({ facts: { market: { ...MARKET, source: 'Yahoo', shortPercentOfFloat: 7.5 }, derived } });
+  assert.match(yahoo.message, /<b>Kennzahlen:<\/b> KGV n\. v\. · Short Interest 7,5 % des Floats\n/);
+});
+
+test('Build_Message: Fallen alle Quellen aus, nennt die Nachricht kurz den Grund', async () => {
+  const blocked = await message({ facts: { marketSources: [
+    { source: 'Finnhub', ok: false, reason: 'kein Schlüssel' },
+    { source: 'Yahoo', ok: false, reason: 'HTTP 429' },
+  ] } });
+  assert.match(blocked.message, /<b>Markt:<\/b> Marktdaten nicht verfügbar \(Finnhub: kein Schlüssel · Yahoo: HTTP 429\)\n/);
+  assert.ok(!blocked.message.includes('Kennzahlen'));
+  assert.equal(blocked.hasOrder, true, 'der Order-Vorschlag hängt nicht an den Marktdaten');
+
+  const escaped = await message({ facts: { marketSources: [{ source: 'Finnhub', ok: false, reason: '<b>kaputt</b>' }] } });
+  assert.match(escaped.message, /Marktdaten nicht verfügbar \(Finnhub: &lt;b&gt;kaputt&lt;\/b&gt;\)/);
+
+  const silent = await message();
+  assert.match(silent.message, /<b>Markt:<\/b> Marktdaten nicht verfügbar\n/);
 });
 
 // --------------------------------------------------------- Parse_Callback
@@ -615,7 +865,7 @@ test('Workflow, Bridge und init.sh passen zusammen', () => {
   // Jede im Workflow verwendete Credential-ID legt init.sh an; die Workflow-ID stimmt überein.
   const init = fs.readFileSync(path.join(ROOT, 'n8n/init.sh'), 'utf8');
   const credentialIds = new Set(workflow.nodes.flatMap((n) => Object.values(n.credentials || {}).map((c) => c.id)));
-  assert.equal(credentialIds.size, 4);
+  assert.equal(credentialIds.size, 5);
   for (const id of credentialIds) assert.ok(init.includes(`"${id}"`), `init.sh legt die Credential-ID ${id} nicht an`);
   assert.ok(init.includes(`WORKFLOW_ID="${workflow.id}"`));
   assert.equal(workflow.settings.errorWorkflow, workflow.id);
@@ -644,4 +894,57 @@ test('Workflow, Bridge und init.sh passen zusammen', () => {
 
   // Im Workflow stehen keine Zugangsdaten.
   assert.doesNotMatch(JSON.stringify(workflow), /sk-ant-|token=|apiKey=|bot\d+:/i);
+});
+
+test('Marktdaten: Finnhub zuerst, Yahoo als Ersatz, kurze Timeouts und höchstens ein Wiederholversuch', () => {
+  const targets = (name, output = 0) => (workflow.connections[name].main[output] || []).map((target) => target.node);
+
+  // Reihenfolge der Quellen
+  assert.deepEqual(targets('13F_Request'), ['Finnhub aktiv?']);
+  assert.deepEqual([targets('Finnhub aktiv?', 0), targets('Finnhub aktiv?', 1)], [['Finnhub_Quote'], ['Yahoo_Cookie']], 'ohne Schlüssel direkt zu Yahoo');
+  assert.deepEqual(targets('Finnhub_Quote'), ['Finnhub-Kurs?']);
+  assert.deepEqual([targets('Finnhub-Kurs?', 0), targets('Finnhub-Kurs?', 1)], [['Finnhub_Profile'], ['Yahoo_Cookie']], 'ohne Kurs von Finnhub übernimmt Yahoo');
+  assert.deepEqual([targets('Finnhub_Profile'), targets('Finnhub_Metric')], [['Finnhub_Metric'], ['Build_Market']]);
+  assert.deepEqual([targets('Yahoo_Cookie'), targets('Yahoo_Crumb'), targets('Yahoo_Quote')], [['Yahoo_Crumb'], ['Yahoo_Quote'], ['Build_Market']]);
+  assert.deepEqual(targets('Build_Market'), ['Marktkap. fehlt?']);
+  assert.deepEqual([targets('Marktkap. fehlt?', 0), targets('Marktkap. fehlt?', 1), targets('SEC_Shares')], [['SEC_Shares'], ['Build_Prompt'], ['Build_Prompt']]);
+
+  // Kein Abruf darf die Meldung lange aufhalten oder abbrechen.
+  const marketNodes = ['Finnhub_Quote', 'Finnhub_Profile', 'Finnhub_Metric', 'Yahoo_Cookie', 'Yahoo_Crumb', 'Yahoo_Quote', 'SEC_Shares'];
+  for (const name of marketNodes) {
+    const n = node(name);
+    assert.equal(n.onError, 'continueRegularOutput', `${name} darf den Workflow nicht abbrechen`);
+    assert.ok(n.parameters.options.timeout <= 6000, `${name}: Timeout höchstens 6 Sekunden`);
+    assert.ok((n.maxTries || 1) <= 2, `${name}: höchstens ein Wiederholversuch`);
+    if (n.retryOnFail) assert.ok(n.waitBetweenTries >= 1000 && n.waitBetweenTries <= 3000, `${name}: kurze Pause vor dem Wiederholversuch`);
+  }
+
+  // Der Finnhub-Schlüssel kommt als Header aus dem n8n-Credential – nie in der URL.
+  for (const name of ['Finnhub_Quote', 'Finnhub_Profile', 'Finnhub_Metric']) {
+    const n = node(name);
+    assert.deepEqual(n.credentials, { httpHeaderAuth: { id: 'insiderFinnhub01', name: 'Finnhub (API-Key)' } });
+    assert.equal(n.parameters.genericAuthType, 'httpHeaderAuth');
+    assert.ok(!n.parameters.queryParameters.parameters.some((parameter) => /token|key/i.test(parameter.name)), `${name}: kein Schlüssel als Parameter`);
+  }
+  const init = fs.readFileSync(path.join(ROOT, 'n8n/init.sh'), 'utf8');
+  assert.match(init, /id: "insiderFinnhub01".*\n\s+data: \{ name: "X-Finnhub-Token", value: env\.FINNHUB_API_KEY \|\| "nicht-gesetzt" \}/);
+
+  // Der Schlüssel selbst erreicht nur n8n-init (legt das Credential an). Der
+  // Workflow erfährt bloß, ob es einen gibt – ohne Schlüssel bleibt es bei Yahoo.
+  const compose = fs.readFileSync(path.join(ROOT, 'docker-compose.yml'), 'utf8');
+  assert.equal((compose.match(/FINNHUB_API_KEY: /g) || []).length, 1);
+  assert.match(compose, /^ {6}FINNHUB_API_KEY: \$\{FINNHUB_API_KEY:-\}$/m);
+  assert.match(compose, /^ {6}FINNHUB_ENABLED: \$\{FINNHUB_API_KEY:\+true\}$/m);
+  const enabled = node('Config').parameters.assignments.assignments.find((assignment) => assignment.name === 'cfg.finnhubEnabled');
+  const evaluate = (env) => new Function('$env', `return (${/^=\{\{(.*)\}\}$/s.exec(enabled.value)[1]});`)(env);
+  assert.deepEqual([evaluate({ FINNHUB_ENABLED: 'true' }), evaluate({ FINNHUB_ENABLED: '' }), evaluate({})], [true, false, false]);
+
+  // Die .env.example erklärt den Schlüssel und enthält keinen.
+  const example = fs.readFileSync(path.join(ROOT, '.env.example'), 'utf8');
+  assert.match(example, /^FINNHUB_API_KEY=$/m);
+
+  // Die SEC verlangt eine Kennung im User-Agent.
+  const secHeaders = node('SEC_Shares').parameters.headerParameters.parameters;
+  assert.deepEqual(secHeaders.map((header) => header.name), ['User-Agent']);
+  assert.match(node('SEC_Shares').parameters.url, /companyconcept\/CIK\{\{ .+padStart\(10, '0'\) \}\}\/dei\/EntityCommonStockSharesOutstanding\.json$/);
 });

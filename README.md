@@ -16,7 +16,7 @@ flowchart LR
   TG[Telegram] -- Button-Klick --> B
   B -- Webhook --> N[n8n-Workflow]
   N --> S1[sec-api.io REST<br/>Form 4, Historie, 13F]
-  N --> Y[Yahoo Finance<br/>Kurs, KGV, Short Interest]
+  N --> Y[Marktdaten<br/>Finnhub, ersatzweise Yahoo]
   N --> C[Claude Haiku 5.5<br/>Einstufung + Begründung]
   N -- Nachricht mit Button --> TG
   N -- Bracket-Order nach Klick --> I[IBKR-Gateway<br/>Paper-Konto]
@@ -28,13 +28,13 @@ flowchart LR
 1. Die **Bridge** hält die WebSocket-Verbindung zum sec-api.io-Stream, lässt nur Form 4 durch und übergibt jedes Filing einmal an n8n.
 2. Der **Workflow** lädt die Transaktionen des Filings und legt sie in der **Datenbank** ab – jedes Form 4, auch Verkäufe und kleine Käufe. Verkauft dabei ein Insider, dessen Kauf du gefolgt bist, bekommst du eine **Verkaufswarnung**.
 3. Weiter geht es nur mit Offenmarktkäufen (Transaction Code `P`, Preis > 0) im Wert von mindestens `MIN_PURCHASE_VALUE_USD`, also 25.000 $, wenn du nichts anderes einstellst.
-4. Für jeden solchen Kauf holt er die bisherigen Transaktionen dieses Insiders, die jüngsten 13F-Meldungen institutioneller Halter, Marktdaten und aus der Datenbank die Käufe anderer Insider desselben Unternehmens (**Cluster**).
+4. Für jeden solchen Kauf holt er die bisherigen Transaktionen dieses Insiders, die jüngsten 13F-Meldungen institutioneller Halter, Marktdaten (Kurs und Marktkapitalisierung von Finnhub, ersatzweise von Yahoo Finance) und aus der Datenbank die Käufe anderer Insider desselben Unternehmens (**Cluster**).
 5. Alle Kennzahlen (Volumen, Bestandsveränderung, Erfolgsquote früherer Käufe, Short Interest …) berechnet der Workflow selbst. **Claude** bekommt sie fertig vorgelegt und liefert nur die Einstufung `SCHWACH`/`MITTEL`/`STARK` mit Begründung. In der Nachricht stehen deshalb keine Zahlen, die das Modell erfunden haben könnte.
 6. Du bekommst eine **Telegram-Nachricht** mit Analyse, Order-Vorschlag und zwei Buttons.
 7. Erst ein Tipp auf **„Order ans Paper-Konto senden“** schickt die Bracket-Order (Kauf-Limit zum Insiderpreis, Take-Profit, Stop-Loss) an IBKR. Das Ergebnis kommt als zweite Nachricht.
 8. Jedes Signal und jede Entscheidung landet im **Signal-Protokoll**. Damit lässt sich später prüfen, was die Signale tatsächlich wert waren (siehe [Signal-Protokoll und Backtest](#signal-protokoll-und-backtest)).
 
-Fällt eine Datenquelle aus (Yahoo, 13F, Historie, Claude, die Datenbank), kommt die Meldung trotzdem und nennt die Lücke. Bricht der Workflow ganz ab, meldet ein Error Trigger den Fehler per Telegram.
+Fällt eine Datenquelle aus (Finnhub, Yahoo, 13F, Historie, Claude, die Datenbank), kommt die Meldung trotzdem und nennt die Lücke – bei den Marktdaten auch den Grund. Bricht der Workflow ganz ab, meldet ein Error Trigger den Fehler per Telegram.
 
 ## Voraussetzungen
 
@@ -43,6 +43,7 @@ Fällt eine Datenquelle aus (Yahoo, 13F, Historie, Claude, die Datenbank), kommt
 | [Docker Desktop](https://www.docker.com/) | führt alles aus | Node.js und `npx n8n` werden nicht gebraucht. Läuft auf Macs mit Apple-Chip und mit Intel |
 | [sec-api.io](https://sec-api.io/pricing) | Stream, Form 4, 13F | Zum Ausprobieren genügt der kostenlose Schlüssel (100 Abrufe insgesamt, ohne Stream). Für den Dauerbetrieb braucht es den Tarif „Personal & Startups“, der die Stream-API enthält |
 | [Claude Console](https://platform.claude.com/) | Claude | API-Key und etwas Prepaid-Guthaben |
+| [Finnhub](https://finnhub.io/register) | Kurs, Marktkapitalisierung, Kennzahlen | Kostenloser Schlüssel für private Nutzung. Optional – ohne ihn fragt der Workflow nur Yahoo Finance, und das blockt die Abrufe meist (siehe [Marktdaten](#marktdaten)) |
 | [Telegram](https://telegram.org/) | Benachrichtigung | Bot über @BotFather, eigene ID über @userinfobot |
 | [Interactive Brokers](https://www.interactivebrokers.eu/) | Paper-Trading | Paper-Konto aktivieren; Kontonummer beginnt mit `D` (z. B. `DU1234567`). Die Schnittstelle für Orders verlangt laut IBKR auch dafür ein vollständig eröffnetes und eingezahltes Live-Konto vom Typ „IBKR Pro“. Ohne IBKR läuft alles außer dem Order-Button |
 
@@ -56,9 +57,11 @@ Fällt eine Datenquelle aus (Yahoo, 13F, Historie, Claude, die Datenbank), kommt
 
    Trage in `.env` deine Schlüssel ein. Jede Variable ist dort erklärt. Für `BRIDGE_SECRET` genügt eine beliebige lange Zufallszeichenfolge, z. B. aus `openssl rand -hex 32`.
 
-2. **Telegram vorbereiten:** Schreibe deinem Bot einmal `/start`. Vorher darf er dir keine Nachrichten senden.
+2. **Kursdaten-Schlüssel anlegen** (kostenlos, empfohlen): Auf <https://finnhub.io/register> ein Konto anlegen. Der Schlüssel steht danach im Dashboard unter „API Key“. Trage ihn in `.env` hinter `FINNHUB_API_KEY=` ein. Ohne ihn steht in den Meldungen meist „Marktdaten nicht verfügbar“.
 
-3. **Starten**
+3. **Telegram vorbereiten:** Schreibe deinem Bot einmal `/start`. Vorher darf er dir keine Nachrichten senden.
+
+4. **Starten**
 
    ```bash
    docker compose up -d
@@ -66,22 +69,22 @@ Fällt eine Datenquelle aus (Yahoo, 13F, Historie, Claude, die Datenbank), kommt
 
    Der erste Start lädt rund 4 GB an Images. Dabei legt ein Hilfscontainer (`n8n-init`) deine Schlüssel als verschlüsselte n8n-Credentials an, importiert den Workflow und veröffentlicht ihn.
 
-4. **n8n öffnen:** <http://localhost:5678> (auch in Safari) – beim ersten Aufruf legst du ein lokales Admin-Konto an. Der Workflow „Insider Pipeline“ ist bereits vorhanden und steht auf „Published“.
+5. **n8n öffnen:** <http://localhost:5678> (auch in Safari) – beim ersten Aufruf legst du ein lokales Admin-Konto an. Der Workflow „Insider Pipeline“ ist bereits vorhanden und steht auf „Published“.
 
-5. **Prüfen, ob alles verbunden ist**
+6. **Prüfen, ob alles verbunden ist**
 
    ```bash
    docker compose logs bridge        # erwartet: "sec-api-Stream verbunden"
    docker compose logs ibkr-gateway  # erwartet: "Gateway running and authenticated"
    ```
 
-6. **Datenbank vorfüllen** (empfohlen), damit Cluster-Käufe vom ersten Tag an erkannt werden:
+7. **Datenbank vorfüllen** (empfohlen), damit Cluster-Käufe vom ersten Tag an erkannt werden:
 
    ```bash
    docker compose run --rm research backfill --days 30
    ```
 
-7. **Testlauf mit einem echten Filing** (siehe nächster Abschnitt).
+8. **Testlauf mit einem echten Filing** (siehe nächster Abschnitt).
 
 ### Aktualisieren
 
@@ -115,18 +118,36 @@ Nach wenigen Sekunden sollte die Telegram-Nachricht eintreffen. Tippe auf den Bu
 
 Dieser Testlauf ruft die echten APIs auf. **Er ist der erste Lauf gegen die echten Dienste überhaupt** – siehe [Was noch nicht geprüft ist](#was-noch-nicht-geprüft-ist).
 
+Jeder Testlauf kostet Abrufe bei sec-api.io: vier ohne Angabe (einer für die Suche), drei mit einer Accession Number. Die Nummer des zuletzt gemeldeten Signals findest du so:
+
+```bash
+grep -o '"accessionNo":"[^"]*"' data/signals.jsonl | tail -1
+```
+
+### Marktdaten prüfen, ohne sec-api-Abrufe zu verbrauchen
+
+Ob dein Finnhub-Schlüssel funktioniert und Finnhub ein Symbol kennt, zeigt ein direkter Abruf. Er liest den Schlüssel aus der `.env`, ohne ihn anzuzeigen:
+
+```bash
+KEY=$(grep '^FINNHUB_API_KEY=' .env | cut -d= -f2-)
+curl -s -H "X-Finnhub-Token: $KEY" "https://finnhub.io/api/v1/quote?symbol=AAPL"; echo
+curl -s -H "X-Finnhub-Token: $KEY" "https://finnhub.io/api/v1/stock/profile2?symbol=AAPL"; echo
+```
+
+Erwartet wird beim ersten Abruf ein Kurs im Feld `c` und ein Zeitstempel in `t`, beim zweiten unter anderem `marketCapitalization` (in Millionen). `{"error":"Invalid API key"}` heißt: Schlüssel prüfen. Lauter Nullen beim Kurs oder `{}` beim Profil heißen: Finnhub kennt dieses Symbol nicht – dann springen im Workflow Yahoo bzw. die Aktienzahl der SEC ein.
+
 ### Automatische Tests
 
 Diese Tests brauchen keine Zugangsdaten und rufen keine echten APIs auf.
 
 ```bash
-sh test/e2e/run.sh                          # End-to-End: echtes n8n, alle externen Dienste als Mock (ca. 5 Minuten)
-node --test test/unit/workflow.test.js      # Logik der Code-Nodes und Filter (Node.js >= 22.13)
+sh test/e2e/run.sh                          # End-to-End: echtes n8n, alle externen Dienste als Mock (ca. 6 Minuten)
+node --test test/unit/                      # Logik der Code-Nodes, Filter und Marktdaten (Node.js >= 22.13)
 cd bridge && npm ci && npm test             # Bridge
 cd research && npm test                     # Datenbank, Protokoll, Auswertung, Backtest (Node.js >= 22.13)
 ```
 
-Der End-to-End-Test startet n8n mit genau dem Workflow aus diesem Repository und spielt 14 Szenarien durch, darunter die aus Teil 14 der ursprünglichen Anleitung: Kauf mit Analyse und Order nach Klick, Cluster-Kauf eines zweiten Insiders, Verkaufswarnung (genau einmal, und nur nach gesendeter Order), Verkauf / Preis 0 / zu kleiner Kaufwert (keine Meldung, aber in der Datenbank), wenige teure Aktien, Ausfall von Yahoo und Claude, unbekannter Kontrakt, verzögert indexiertes Filing, fremde und veraltete Klicks, von IBKR abgelehnte Order, der Fehlerpfad und Webhook-Aufrufe ohne Secret. Danach wird der Protokoll-Dienst gestoppt, um einen Ausfall der Datenbank durchzuspielen, und zum Schluss laufen Nachladen, Auswertung und Backtest gegen die Mock-Daten.
+Der End-to-End-Test startet n8n mit genau dem Workflow aus diesem Repository und spielt 16 Szenarien durch, darunter die aus Teil 14 der ursprünglichen Anleitung: Kauf mit Analyse und Order nach Klick, Cluster-Kauf eines zweiten Insiders, Verkaufswarnung (genau einmal, und nur nach gesendeter Order), Verkauf / Preis 0 / zu kleiner Kaufwert (keine Meldung, aber in der Datenbank), wenige teure Aktien, Marktdaten von Finnhub, gedrosseltes Finnhub mit Yahoo als Ersatz, berechnete Marktkapitalisierung, Ausfall aller Kursquellen und von Claude, unbekannter Kontrakt, verzögert indexiertes Filing, fremde und veraltete Klicks, von IBKR abgelehnte Order, der Fehlerpfad und Webhook-Aufrufe ohne Secret. Danach wird der Protokoll-Dienst gestoppt, um einen Ausfall der Datenbank durchzuspielen, es laufen Nachladen, Auswertung und Backtest gegen die Mock-Daten, und zum Schluss startet n8n ohne Finnhub-Schlüssel neu: Dann muss alles wie bisher über Yahoo laufen.
 
 ## Datenbank, Cluster und Verkaufswarnung
 
@@ -180,7 +201,40 @@ LIMIT 20;
 
 Die Datei wächst um knapp 1 KB je Meldung. Bei einigen hundert bis gut tausend Form 4 pro Handelstag sind das grob 100 bis 300 MB im Jahr.
 
+## Marktdaten
+
+Die Zeile „Markt:“ der Meldung nennt Kurs, Abweichung vom Insiderpreis, Marktkapitalisierung, Quelle und Zeitpunkt des Kurses in deiner Zeitzone:
+
+```
+Markt: Kurs 5,12 $ (−6,9 % ggü. Insiderpreis) · Marktkap. 38,20 Mio. $ · Finnhub, 14.11. 21:59
+```
+
+Die Quellen werden in dieser Reihenfolge gefragt:
+
+1. **Finnhub** – wenn in der `.env` ein `FINNHUB_API_KEY` steht. Drei Abrufe je Meldung: Kurs (`/quote`), Unternehmensprofil mit Marktkapitalisierung (`/stock/profile2`) und Kennzahlen wie KGV und 52-Wochen-Spanne (`/stock/metric`).
+2. **Yahoo Finance** – ohne Schlüssel, oder wenn Finnhub keinen Kurs liefert (Fehler, Drosselung, unbekanntes Symbol). Nur Yahoo liefert Short Interest und den Anteil institutioneller Halter; kommt der Kurs von Finnhub, fehlen diese beiden Angaben.
+3. **SEC** – nur wenn ein Kurs da ist, aber keine Marktkapitalisierung. Dann holt der Workflow die Zahl der ausstehenden Aktien vom Deckblatt des jüngsten Quartals- oder Jahresberichts (`data.sec.gov`, Kennzahl `dei:EntityCommonStockSharesOutstanding`) und rechnet Kurs × Aktien. Die Nachricht kennzeichnet das: „Marktkap. ca. 38,20 Mio. $ (berechnet: Kurs × 7,5 Mio. Aktien lt. SEC, Stand 30.09.2026)“. Die Aktienzahl kann einige Monate alt sein; älter als 400 Tage wird sie nicht verwendet.
+
+Was eine Quelle nicht liefert, bleibt leer – geschätzt wird nichts. Fallen alle Quellen aus, nennt die Zeile die Gründe: „Marktdaten nicht verfügbar (Finnhub: kein Schlüssel · Yahoo: HTTP 429)“.
+
+Die Marktdaten halten die Meldung nur kurz auf: Jeder Abruf hat ein Zeitlimit von fünf bis sechs Sekunden, und bei einem Fehler gibt es höchstens einen Wiederholversuch nach anderthalb Sekunden. Im Normalfall sind es drei kurze Abrufe hintereinander.
+
+### Warum Finnhub
+
+Geprüft am 15.11.2026 auf den Seiten der Anbieter. Der Bedarf: drei Abrufe je Meldung. Bei geschätzt 30 bis 150 Meldungen pro Handelstag (Käufe ab 25.000 $; nicht gemessen) sind das 90 bis 450 Abrufe am Tag, gebündelt am Abend deutscher Zeit.
+
+| Anbieter | Kostenloser Zugang | Passt? |
+|---|---|---|
+| [Finnhub](https://finnhub.io/pricing) | 60 Abrufe pro Minute (ein Tageslimit nennt die Preisseite nicht), private Nutzung erlaubt. Kurs für US-Aktien in Echtzeit, Unternehmensprofil mit Marktkapitalisierung und Kennzahlen sind [nicht kostenpflichtig](https://finnhub.io/docs/api/quote) | Ja. Short Interest und Aktionärsstruktur kosten extra |
+| [Financial Modeling Prep](https://site.financialmodelingprep.com/pricing-plans) | 250 Abrufe pro Tag, nur Schlusskurse; Marktkapitalisierung nur für 87 große Titel | Nein – deckt Small Caps nicht ab |
+| [Twelve Data](https://twelvedata.com/pricing) | 8 Credits pro Minute, 800 pro Tag; Fundamentaldaten kosten laut Preisseite bis zu 100 Credits je Abruf | Nein – der Kurs ginge, für die Marktkapitalisierung reichen die Credits nicht |
+| [Alpha Vantage](https://www.alphavantage.co/support/) | 25 Abrufe pro Tag; Echtzeit- und 15-Minuten-Kurse nur gegen Bezahlung | Nein – zu wenig Abrufe |
+
+Die Bedingungen ändern sich; maßgeblich sind die Seiten der Anbieter. Der Schlüssel liegt nur in deiner `.env` und in n8n als verschlüsseltes Credential. Er wird als Header gesendet und steht weder in einer Adresse noch im Workflow.
+
 ## Signal-Protokoll und Backtest
+
+> **Bekanntes Problem:** Auswertung und Backtest (`research report`, `research backtest`) holen ihre Tageskurse von Yahoos Chart-Schnittstelle. Sie ist vom selben Block betroffen wie die Marktdaten (HTTP 429, gemessen am 14.11.2026). Bis das behoben ist, können beide Befehle scheitern oder für viele Titel „keine Kursdaten“ melden. Die Telegram-Meldungen sind davon nicht betroffen.
 
 Ob die Signale etwas taugen, zeigt erst die Messung. Dafür gibt es zwei Werkzeuge, die dieselbe Rechenlogik verwenden: das Protokoll für die Signale, die du ab jetzt bekommst, und den Backtest für die Vergangenheit.
 
@@ -242,6 +296,8 @@ Alle Einstellungen stehen in `.env`. Nach einer Änderung: `docker compose up -d
 | `TAKE_PROFIT_PCT` | `15` | Abstand des Take-Profit zum Limitpreis in Prozent |
 | `ORDER_BUTTON_MAX_AGE_HOURS` | `24` | Danach ist der Order-Button wirkungslos |
 | `ANTHROPIC_MODEL` | `claude-haiku-5-5` | Modell für die Einstufung |
+| `FINNHUB_API_KEY` | leer | Kostenloser Schlüssel für Kursdaten. Leer: Der Workflow fragt nur Yahoo Finance |
+| `SEC_USER_AGENT` | leer | Kennung für Abrufe bei der SEC (Name und Kontaktadresse, wie die SEC es erbittet). Leer: `insider-pipeline/1.0` |
 | `COMPOSE_PROFILES` | `ibkr` | Leer lassen, wenn du ein eigenes IBKR-Gateway betreibst |
 
 Den Prompt findest du in n8n im Node **Build_Prompt**, den Aufbau der Nachricht in **Build_Message**. Nach Änderungen in der Oberfläche auf „Publish“ klicken. `docker compose up -d` überschreibt einen vorhandenen Workflow nicht; die Version aus dem Repository spielst du wieder ein wie unter [Aktualisieren](#aktualisieren) beschrieben.
@@ -256,7 +312,7 @@ Die Anleitung, nach der dieses Projekt entstanden ist, hätte an mehreren Stelle
 | Filter auf `transactions[0].transactionCode` der Stream-Nachricht | Der Stream liefert nur Metadaten, keine Transaktionen | Transaktionen kommen aus der Insider-Trading-API; alle Kauf-Lose eines Filings werden summiert |
 | Schwelle „mehr als 1.000 Aktien“ | 1.000 Aktien können 500 $ oder 900.000 $ wert sein | Schwelle nach Kaufwert (`MIN_PURCHASE_VALUE_USD`) |
 | Historie über `ticker` und `reportingOwnerName` | Die Query-API liefert keine Transaktionsdaten | Insider-Trading-API, gesucht über die CIK von Emittent und Insider |
-| Yahoo `v7/finance/quote` mit User-Agent | Verlangt inzwischen Cookie und Crumb; Short Interest ist dort nicht enthalten | Cookie → Crumb → `quoteSummary`. Die Schnittstelle ist inoffiziell und kann sich jederzeit ändern |
+| Yahoo `v7/finance/quote` mit User-Agent | Verlangt inzwischen Cookie und Crumb; Short Interest ist dort nicht enthalten | Zuerst Finnhub (offizielle API, kostenloser Schlüssel). Yahoo bleibt als Ersatz: Cookie → Crumb → `quoteSummary`. Die Schnittstelle ist inoffiziell und blockt Abrufe inzwischen meist |
 | `claude-3-5-haiku-20241022`, `max_tokens: 500`, Antwort aus `content[0].text` | Das Modell wurde im Februar 2026 abgeschaltet. Beim Nachfolger zählen Denk-Tokens mit und der Text steht nicht zwingend im ersten Block | `claude-haiku-5-5`, `max_tokens: 4000`, strukturierte JSON-Ausgabe, Auswertung nach Blocktyp |
 | Rohdaten per `{{$node[...].json}}` in den Prompt, Modell rechnet Kennzahlen | Ergibt `[object Object]`; gerechnete Zahlen eines Modells sind nicht verlässlich | Kennzahlen berechnet der Workflow, das Modell stuft nur ein |
 | `docker run ghcr.io/extt/ibkr-client-portal-api` | Das Image ist nicht öffentlich abrufbar | [IBeam](https://github.com/Voyz/ibeam) 0.6.0: enthält das Gateway und meldet sich selbst an (auch nach Ablauf der Sitzung) |
@@ -275,13 +331,15 @@ Falls du den Entwurf lieber in der IBKR-App statt in Telegram bestätigen möcht
 Aus der Entwicklungsumgebung waren sec-api.io, Yahoo Finance, Telegram und IBKR nicht erreichbar. Geprüft ist der Workflow deshalb gegen Nachbildungen dieser Dienste – in einem echten n8n 2.47.3, aber nicht gegen die echten APIs. Die Formate stammen aus den offiziellen sec-api-Clientbibliotheken und aus verbreiteten Open-Source-Clients (yfinance, ibind). Achte beim ersten Testlauf besonders auf:
 
 - **13F-Abfrage:** `holdings.ticker:<TICKER>` am Endpunkt `/form-13f/holdings`. Bleibt die Zeile „13F-Halter“ leer, stimmt vermutlich die Abfragesyntax nicht.
-- **Yahoo aus der EU:** Der Cookie-Abruf über `fc.yahoo.com` kann an Yahoos Einwilligungsseite scheitern. Dann steht in der Nachricht „Marktdaten nicht verfügbar“; alles andere funktioniert weiter.
+- **Yahoo Finance blockt die Abrufe.** Gemessen am 14.11.2026 von einem Anschluss in Deutschland, mit derselben Kennung wie der Workflow: `fc.yahoo.com` liefert das Cookie (HTTP 404 mit `Set-Cookie`, keine Einwilligungsseite), aber schon der Crumb-Abruf (`/v1/test/getcrumb`) und auch `/v8/finance/chart` antworten mit HTTP 429 „Too Many Requests“ – nach nur wenigen Anfragen, vermutlich eine Bot-Erkennung. Yahoo ist deshalb nur noch Ersatzquelle.
+- **Finnhub mit echtem Schlüssel:** Antwortformate und Bedingungen stammen aus der offiziellen Dokumentation (Stand 15.11.2026). Getestet ist der Abruf nur gegen eine Nachbildung. Offen ist vor allem, wie vollständig Finnhub sehr kleine und außerbörslich gehandelte Titel abdeckt. Der Abschnitt [Marktdaten prüfen](#marktdaten-prüfen-ohne-sec-api-abrufe-zu-verbrauchen) zeigt, wie du das für ein Symbol ohne sec-api-Abrufe nachsiehst.
+- **Aktienzahl von der SEC:** Das Antwortformat ist gegen die echte Schnittstelle geprüft (15.11.2026), der Abruf aus n8n nur gegen eine Nachbildung. Bei Unternehmen mit mehreren Aktienklassen fehlt die Angabe häufig; dann bleibt die Marktkapitalisierung leer. Bei ausländischen Emittenten (20-F, 40-F) wird sie bewusst nicht berechnet.
 - **IBKR-Order:** Aufbau der Bracket-Order und Bestätigung der Rückfragen (`/iserver/reply`). Bitte die drei Orders nach dem ersten Klick in der App kontrollieren.
 - **IBeam-Login:** Die automatische Anmeldung ist für Paper-Zugangsdaten ohne Zwei-Faktor-Abfrage gedacht.
 - **Indexierung bei sec-api:** Der Workflow fragt ein neues Filing bis zu viermal im Abstand von 20 Sekunden ab. Dauert die Indexierung regelmäßig länger, bekommst du Fehlermeldungen „nicht in der Insider-Trading-API gefunden“.
 - **Datenbank unter Last:** Getestet sind einzelne Meldungen, nicht das Aufkommen eines echten Handelstags mit mehreren hundert bis über tausend Form 4. Ob alles ankommt, zeigt `docker compose run --rm research stats` nach dem ersten Tag.
 - **Cluster und Verkaufswarnung:** Beide ordnen Meldungen über die Kennnummern (CIK) von Unternehmen und Insider zu, wie sec-api.io sie liefert. Bei gemeinsamen Meldungen mehrerer Personen (etwa ein Fonds und dessen Verwalter) ist ungeprüft, welche Person sec-api.io nennt.
-- **Auswertung und Backtest:** Historische Kurse kommen von Yahoos Chart-Schnittstelle (`/v8/finance/chart`), die Insiderkäufe aus einer Zeitraum-Abfrage (`filedAt:[… TO …]`) der Insider-Trading-API. Beides ist nur gegen Nachbildungen getestet. Prüfe beim ersten Backtest ein, zwei Zeilen aus `trades.csv` von Hand gegen ein Kursdiagramm.
+- **Auswertung und Backtest:** Historische Kurse kommen von Yahoos Chart-Schnittstelle (`/v8/finance/chart`), die Insiderkäufe aus einer Zeitraum-Abfrage (`filedAt:[… TO …]`) der Insider-Trading-API. Beides ist nur gegen Nachbildungen getestet. Prüfe beim ersten Backtest ein, zwei Zeilen aus `trades.csv` von Hand gegen ein Kursdiagramm. Die Chart-Schnittstelle antwortete am 14.11.2026 mit HTTP 429 (siehe oben) – das ist ein bekanntes, noch offenes Problem.
 
 ## Fehlerbehebung
 
@@ -292,6 +350,12 @@ Aus der Entwicklungsumgebung waren sec-api.io, Yahoo Finance, Telegram und IBKR 
 | Bridge-Log: „konnte nicht an n8n übergeben werden: HTTP 404“ | Workflow nicht veröffentlicht: in n8n auf „Publish“ klicken |
 | Bridge-Log: HTTP 403 bei der Übergabe | `BRIDGE_SECRET` geändert: `docker compose up -d` ausführen, damit n8n den neuen Wert bekommt |
 | „KI-Analyse nicht verfügbar“ | Anthropic-Guthaben aufgebraucht oder Key falsch; der Fehlertext steht in der Nachricht |
+| „Marktdaten nicht verfügbar (Finnhub: kein Schlüssel · Yahoo: HTTP 429)“ | Yahoo blockt die Abrufe, und es ist kein Finnhub-Schlüssel hinterlegt. Kostenlosen Schlüssel auf <https://finnhub.io/register> anlegen, in `.env` als `FINNHUB_API_KEY` eintragen, dann `docker compose up -d` |
+| „Finnhub: HTTP 401“ in der Zeile „Markt:“ | Der Schlüssel ist falsch oder unvollständig eingetragen. Mit dem Abruf unter [Marktdaten prüfen](#marktdaten-prüfen-ohne-sec-api-abrufe-zu-verbrauchen) kontrollieren |
+| „Finnhub: HTTP 429“ | Mehr als 60 Abrufe in einer Minute. Für diese Meldung springt Yahoo ein; die nächste klappt wieder |
+| „Finnhub: kein Kurs für …“ | Finnhub kennt das Symbol nicht (häufig bei außerbörslich gehandelten Titeln). Yahoo wird als Ersatz gefragt |
+| „Marktkap. n. v. (…)“ | Weder die Kursquelle noch die SEC nennen eine verwertbare Zahl; der Grund steht in der Klammer. Der Kurs stimmt trotzdem |
+| Nach dem Eintragen des Schlüssels steht weiter „Yahoo“ oder „kein Schlüssel“ in der Zeile | `docker compose up -d` ausführen, damit n8n den Schlüssel bekommt. Fehlen Quelle und Uhrzeit in der Zeile ganz, läuft noch der alte Workflow – siehe [Aktualisieren](#aktualisieren) |
 | „IBKR-Gateway nicht erreichbar oder nicht eingeloggt“ | `docker compose logs ibkr-gateway` prüfen. Nach zu vielen Fehlanmeldungen beendet sich IBeam absichtlich: Zugangsdaten korrigieren, dann `docker compose up -d` |
 | IBKR antwortet mit „Access Denied“ | Das Gateway lässt die Adresse nicht zu: `ibkr/conf.yaml` muss eingebunden sein (Abschnitt `ips.allow`) |
 | Telegram-Button reagiert nicht | Für den Bot ist ein Webhook gesetzt oder ein zweites Programm fragt denselben Bot ab; das Bridge-Log nennt den Grund |
@@ -317,7 +381,8 @@ docker compose down               # stoppen (Daten bleiben im Volume n8n_data)
 |---|---|
 | sec-api.io „Personal & Startups“ | 55 USD/Monat (49 USD bei jährlicher Zahlung); zum Ausprobieren 100 Abrufe kostenlos – ein Testlauf mit `replay.js` braucht etwa vier |
 | Anthropic, Claude Haiku 5.5 | 0,10 USD je Mio. Eingabe- und 0,50 USD je Mio. Ausgabe-Tokens; pro Analyse unter 0,001 USD, bei 500 Analysen im Monat unter 0,50 USD |
-| Yahoo Finance, Telegram, n8n, IBKR-Paper-Konto | kostenlos (für das Paper-Konto muss das IBKR-Live-Konto eingezahlt sein) |
+| Finnhub (Kursdaten) | kostenlos für private Nutzung, 60 Abrufe pro Minute |
+| SEC (Aktienzahl), Yahoo Finance, Telegram, n8n, IBKR-Paper-Konto | kostenlos (für das Paper-Konto muss das IBKR-Live-Konto eingezahlt sein) |
 
 Die Preise ändern sich; maßgeblich sind die Preisseiten der Anbieter.
 
