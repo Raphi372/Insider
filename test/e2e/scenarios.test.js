@@ -299,10 +299,10 @@ test('Hat Finnhub kein Unternehmensprofil, wird die Marktkapitalisierung aus der
     /<b>Markt:<\/b> Kurs 12,00 \$ \(\+17,6 % ggü\. Insiderpreis\) · Marktkap\. ca\. 1,44 Mrd\. \$ \(berechnet: Kurs × 120,0 Mio\. Aktien lt\. SEC, Stand 30\.09\.2026\) · Finnhub, 10\.11\. 22:00\n/,
   );
 
-  // Abgefragt wird die Aktienzahl dieses Unternehmens – mit einer Kennung, wie die SEC sie verlangt.
+  // Abgefragt wird die Aktienzahl dieses Unternehmens – mit der Kennung aus SEC_USER_AGENT (siehe e2e.env).
   const [shares] = await requests('secdata');
   assert.equal(shares.path, '/secdata/api/xbrl/companyconcept/CIK0001000015/dei/EntityCommonStockSharesOutstanding.json');
-  assert.equal(shares.headers['user-agent'], 'insider-pipeline/1.0');
+  assert.equal(shares.headers['user-agent'], 'Insider E2E e2e@example.com');
   assert.equal((await requests('yahoo')).length, 0);
 
   const entry = await loggedSignal('0001000000-26-000015');
