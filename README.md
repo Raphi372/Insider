@@ -275,7 +275,7 @@ Verworfene Angaben stehen im Signal-Protokoll unter `financing.rejected`.
 **Rechnen:** Den Rest rechnet der Workflow selbst:
 
 - **Wert eines Warrants nach Black-Scholes:** Kurs, Ausübungspreis und Laufzeit stammen aus dem Form 4, ersatzweise aus dem Dokument. Dazu kommen der Zins aus `RISK_FREE_RATE_PCT` und drei angenommene Volatilitäten (60, 100 und 140 %). Daraus ergibt sich eine Spanne.
-- **Effektiver Preis je Aktie:** der Preis je Unit abzüglich der Warrants.
+- **Effektiver Preis je Aktie:** der Preis je Unit abzüglich der Warrants. Zum Kauf zählen nur Warrants, die im selben Vorgang gekauft wurden (Code `P` in Tabelle II). Geänderte ältere Papiere, etwa Warrants mit gesenktem Ausübungspreis, stehen zwar auch im Form 4, gehören aber nicht dazu. Ergibt sich mehr als zwei Warrants je Aktie oder ein Preis von null oder darunter, lässt die Meldung den Wert weg und nennt den Grund.
 - **Höchstmögliche Verwässerung:** neue Aktien, Warrants und Wandlung der Anleihe; im ungünstigsten Fall mit Reset auf die Untergrenze. Nennt das Dokument die Zahl der Warrants nicht, gilt die Zusammensetzung der Units aus dem Form 4.
 
 ```
@@ -424,6 +424,7 @@ Aus der Entwicklungsumgebung waren sec-api.io, Yahoo Finance, Telegram und IBKR 
 | Nach dem Eintragen des Schlüssels steht weiter „Yahoo“ oder „kein Schlüssel“ in der Zeile | `docker compose up -d` ausführen, damit n8n den Schlüssel bekommt. Fehlen Quelle und Uhrzeit in der Zeile ganz, läuft noch der alte Workflow – siehe [Aktualisieren](#aktualisieren) |
 | „Vertragsdetails nicht ermittelt: Dokumente nicht abgerufen: SEC_USER_AGENT enthält keine E-Mail-Adresse …“ | In `.env` hinter `SEC_USER_AGENT=` Namen und E-Mail-Adresse eintragen, dann `docker compose up -d` |
 | „Vertragsdetails nicht ermittelt: … HTTP 403“ | Die SEC lehnt die Kennung ab. Namen und eine gültige E-Mail-Adresse eintragen; mit dem Abruf unter [Privatplatzierung prüfen](#privatplatzierung-prüfen) kontrollieren |
+| „Vertragsdetails nicht ermittelt: KI: …“ | Claude konnte die Vertragsdokumente nicht auslesen; dahinter steht der Grund, den die API nennt. Der Rest der Meldung stimmt, und der Link zur Quelle führt zum Dokument. Tritt das wiederholt auf, den Text aus der Meldung melden |
 | „Vertragsdetails nicht ermittelt: kein passendes Filing zwischen …“ | Das Unternehmen hat (noch) kein 8-K oder ähnliches Dokument zur Maßnahme eingereicht. Ein 8-K darf bis zu vier Geschäftstage nach dem Vertrag kommen |
 | „Kurs … liegt … unter dem Insiderpreis … – kein Order-Vorschlag“ | Absicht: Die Order würde sofort ausgeführt, der Stop-Loss womöglich gleich danach. Die Grenze stellt `ORDER_MAX_PRICE_GAP_PCT` ein (siehe [Kein Order-Vorschlag …](#kein-order-vorschlag-bei-kurs-weit-unter-dem-insiderpreis)) |
 | Bei einer Privatplatzierung fehlt die Zeile „Finanzierung:“ | n8n oder der Dienst `journal` arbeiten noch mit der alten Version – siehe [Aktualisieren](#aktualisieren), mit `--build` |

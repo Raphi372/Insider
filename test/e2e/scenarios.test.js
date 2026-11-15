@@ -343,7 +343,7 @@ test('Privatplatzierung: Bedingungen aus dem 8-K, Warrant-Wert, und kein Order-V
 
   // Erst liest die KI die Bedingungen aus, dann bewertet sie den Kauf mit den geprüften Angaben.
   const [extract, analysis] = await requests('anthropic');
-  assert.ok(extract.body.output_config.format.schema.properties.exchangeCapProzent);
+  assert.ok(extract.body.output_config.format.schema.properties.angaben.items.properties.feld.enum.includes('exchangeCapProzent'));
   assert.match(extract.body.messages[0].content, /<dokument nr="1" form="8-K" eingereicht="2026-11-06" typ="8-K">\nItem 1\.01 Entry into a Material Definitive Agreement\./);
   assert.ok(!extract.body.messages[0].content.includes('EntityCentralIndexKey'), 'der XBRL-Kopf gehört nicht in den Auszug');
   assert.match(analysis.body.messages[0].content, /"financing": \{/);

@@ -370,19 +370,19 @@ const EXTRACTION = [
 ];
 
 /**
- * Antwort auf die Auslese-Anfrage: alle Felder des Schemas, belegte mit der
+ * Antwort auf die Auslese-Anfrage: je gefundenem Feld ein Eintrag mit der
  * Nummer des Dokuments, in dem das Zitat steht – wie es das Modell tun soll.
  */
 function extractionAnswer(body) {
   const content = String(((body.messages || [])[0] || {}).content || '');
   const documents = [...content.matchAll(/<dokument nr="(\d+)"[^>]*>\n([\s\S]*?)\n<\/dokument>/g)].map((m) => ({ nr: Number(m[1]), text: m[2] }));
-  const answer = Object.fromEntries(Object.keys(body.output_config.format.schema.properties)
-    .map((key) => [key, { gefunden: false, wert: '', zitat: '', dokument: 0 }]));
-  for (const [key, wert, zitat] of EXTRACTION) {
-    const doc = documents.find((d) => d.text.includes(zitat));
-    answer[key] = { gefunden: true, wert, zitat, dokument: doc ? doc.nr : 1 };
-  }
-  return answer;
+  const known = body.output_config.format.schema.properties.angaben.items.properties.feld.enum;
+  return {
+    angaben: EXTRACTION.filter(([feld]) => known.includes(feld)).map(([feld, wert, zitat]) => {
+      const doc = documents.find((d) => d.text.includes(zitat));
+      return { feld, wert, zitat, dokument: doc ? doc.nr : 1 };
+    }),
+  };
 }
 
 const LLM_VERDICT = {
