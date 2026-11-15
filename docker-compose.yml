@@ -22,6 +22,8 @@ services:
       BRIDGE_SECRET: ${BRIDGE_SECRET:-}
       TELEGRAM_BASE_URL: ${INSIDER_TELEGRAM_BASE_URL:-https://api.telegram.org}
       ANTHROPIC_BASE_URL: ${INSIDER_ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      # Optional: kostenloser Schlüssel für Kursdaten. Ohne ihn fragt der Workflow nur Yahoo.
+      FINNHUB_API_KEY: ${FINNHUB_API_KEY:-}
       WORKFLOW_IMPORT: ${WORKFLOW_IMPORT:-}
     volumes:
       - n8n_data:/home/node/.n8n
@@ -68,6 +70,13 @@ services:
       SEC_API_BASE_URL: ${INSIDER_SEC_API_BASE_URL:-https://api.sec-api.io}
       YAHOO_BASE_URL: ${INSIDER_YAHOO_BASE_URL:-https://query1.finance.yahoo.com}
       YAHOO_COOKIE_URL: ${INSIDER_YAHOO_COOKIE_URL:-https://fc.yahoo.com}
+      # Marktdaten: Der Finnhub-Schlüssel selbst liegt als n8n-Credential vor
+      # (siehe n8n-init). Hier steht nur, ob es einen gibt.
+      FINNHUB_ENABLED: ${FINNHUB_API_KEY:+true}
+      FINNHUB_BASE_URL: ${INSIDER_FINNHUB_BASE_URL:-https://finnhub.io/api/v1}
+      # Zahl der ausstehenden Aktien, falls die Marktkapitalisierung fehlt.
+      SEC_DATA_BASE_URL: ${INSIDER_SEC_DATA_BASE_URL:-https://data.sec.gov}
+      SEC_USER_AGENT: ${SEC_USER_AGENT:-insider-pipeline/1.0}
     volumes:
       - n8n_data:/home/node/.n8n
     healthcheck:

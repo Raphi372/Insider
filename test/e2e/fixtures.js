@@ -94,6 +94,10 @@ const FILINGS = {
     accessionNo: '0001000000-26-000013', ticker: 'DOWN', issuerCik: '1000006', filedAt: '2026-11-13T10:00:00-05:00',
     transactions: [transaction({ code: 'S', shares: 1000, price: 13, after: 24000, date: '2026-11-12', acquired: 'D' })],
   }),
+  // Kauf, während Finnhub drosselt (HTTP 429) -> Yahoo springt ein.
+  '0001000000-26-000014': form4({ accessionNo: '0001000000-26-000014', ticker: 'FBCK', issuerCik: '1000014', transactions: purchaseLots() }),
+  // Kauf, zu dem Finnhub kein Unternehmensprofil hat -> Marktkapitalisierung aus der Aktienzahl der SEC.
+  '0001000000-26-000015': form4({ accessionNo: '0001000000-26-000015', ticker: 'CALC', issuerCik: '1000015', transactions: purchaseLots() }),
 };
 
 // Dieses Filing lässt die sec-api im Mock mit HTTP 500 scheitern (Fehlerpfad).
@@ -158,12 +162,62 @@ function institutionalHoldings(ticker) {
 // PRCY ist die teure Aktie der Testdaten (um 900 $), alle anderen kosten um 10 $.
 const basePrice = (symbol) => (symbol === 'PRCY' ? 900 : 10);
 
+// Zeitpunkt aller Testkurse: 10.11.2026, 16:00 Uhr New York = 22:00 Uhr Berlin.
+const QUOTE_TIME = Date.parse('2026-11-10T21:00:00Z') / 1000;
+
+/** Finnhub /quote. Unbekannte Symbole beantwortet Finnhub mit lauter Nullen. */
+function finnhubQuote(symbol) {
+  if (symbol === 'NOQUOTE') return { c: 0, d: null, dp: null, h: 0, l: 0, o: 0, pc: 0, t: 0 };
+  const price = basePrice(symbol) * 1.2;
+  return { c: price, d: price * 0.01, dp: 1.0101, h: price * 1.02, l: price * 0.98, o: price * 0.99, pc: price * 0.99, t: QUOTE_TIME };
+}
+
+/** Finnhub /stock/profile2: Marktkapitalisierung und Aktienzahl in Millionen. Ohne Profil kommt {}. */
+function finnhubProfile(symbol) {
+  if (symbol === 'CALC') return {};
+  return {
+    country: 'US', currency: 'USD', exchange: 'NASDAQ NMS - GLOBAL MARKET', finnhubIndustry: 'Technology', ipo: '2010-06-29',
+    logo: '', marketCapitalization: 1500, name: `${symbol} Corp`, phone: '', shareOutstanding: 125, ticker: symbol, weburl: '',
+  };
+}
+
+/** Finnhub /stock/metric?metric=all (gekürzt auf die Felder, die der Workflow liest, plus Beiwerk). */
+function finnhubMetric(symbol) {
+  return {
+    metric: { '10DayAverageTradingVolume': 0.21, '52WeekHigh': 14.2, '52WeekLow': 7.5, '52WeekLowDate': '2026-04-08', beta: 1.1, marketCapitalization: 1500, peTTM: 18.4 },
+    metricType: 'all',
+    series: { annual: { currentRatio: [{ period: '2025-12-31', v: 1.5 }] }, quarterly: {} },
+    symbol,
+  };
+}
+
+/** SEC companyconcept: ausstehende Aktien laut Deckblatt der Berichte. Nur für CALC hinterlegt. */
+function secShares(cik) {
+  if (cik !== '0001000015') return null;
+  const fact = (end, val, form, filed, extra = {}) => ({ end, val, accn: '0001000015-26-000001', fy: 2026, fp: 'Q3', form, filed, ...extra });
+  return {
+    cik: 1000015,
+    taxonomy: 'dei',
+    tag: 'EntityCommonStockSharesOutstanding',
+    label: 'Entity Common Stock, Shares Outstanding',
+    entityName: 'CALC Corp',
+    units: {
+      shares: [
+        fact('2026-06-30', 118000000, '10-Q', '2026-08-05', { frame: 'CY2026Q2I' }),
+        fact('2026-09-30', 120000000, '10-Q', '2026-11-04', { frame: 'CY2026Q3I' }),
+        // Jünger, aber kein Quartals- oder Jahresbericht – zählt nicht.
+        fact('2026-10-15', 999, 'S-1', '2026-10-20'),
+      ],
+    },
+  };
+}
+
 function quoteSummary(symbol) {
   const value = (raw) => ({ raw, fmt: String(raw) });
   return {
     quoteSummary: {
       result: [{
-        price: { symbol, regularMarketPrice: value(basePrice(symbol) * 1.2), marketCap: value(1500000000), currency: 'USD' },
+        price: { symbol, regularMarketPrice: value(basePrice(symbol) * 1.2), regularMarketTime: QUOTE_TIME, marketCap: value(1500000000), currency: 'USD' },
         summaryDetail: { trailingPE: value(18.4), forwardPE: value(15.1), fiftyTwoWeekLow: value(7.5), fiftyTwoWeekHigh: value(14.2) },
         defaultKeyStatistics: { shortPercentOfFloat: value(0.075), shortRatio: value(3.2), heldPercentInstitutions: value(0.61) },
       }],
@@ -216,4 +270,7 @@ const LLM_VERDICT = {
   datenluecken: [],
 };
 
-module.exports = { FILINGS, BROKEN_ACCESSION, streamFiling, history, institutionalHoldings, quoteSummary, chart, LLM_VERDICT };
+module.exports = {
+  FILINGS, BROKEN_ACCESSION, streamFiling, history, institutionalHoldings, quoteSummary, chart, LLM_VERDICT,
+  finnhubQuote, finnhubProfile, finnhubMetric, secShares,
+};

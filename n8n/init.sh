@@ -42,6 +42,10 @@ node -e '
       data: { accessToken: env.TELEGRAM_BOT_TOKEN, baseUrl: env.TELEGRAM_BASE_URL || "https://api.telegram.org" } },
     { id: "insiderBridge001", name: "Bridge (X-Bridge-Token)", type: "httpHeaderAuth",
       data: { name: "X-Bridge-Token", value: env.BRIDGE_SECRET } },
+    // Optional. Ohne Schlüssel fragt der Workflow Finnhub gar nicht erst ab
+    // (FINNHUB_ENABLED in docker-compose.yml); der Platzhalter wird nie gesendet.
+    { id: "insiderFinnhub01", name: "Finnhub (API-Key)", type: "httpHeaderAuth",
+      data: { name: "X-Finnhub-Token", value: env.FINNHUB_API_KEY || "nicht-gesetzt" } },
   ]));
 ' > "$CREDENTIALS_FILE"
 n8n import:credentials --input="$CREDENTIALS_FILE"
