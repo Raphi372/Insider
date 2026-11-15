@@ -69,7 +69,10 @@ function parseForm4(doc = {}) {
   const ticker = String(issuer.tradingSymbol || '').trim().toUpperCase();
   const tickerValid = /^[A-Z][A-Z0-9.\-]{0,9}$/.test(ticker) && !['NONE', 'NA', 'N.A'].includes(ticker);
 
-  // Hinweis auf einen vorab festgelegten Handelsplan (Rule 10b5-1) in Fußnoten oder Anmerkungen.
+  // Vorab festgelegter Handelsplan (Rule 10b5-1): Seit April 2023 hat das Formular dafür ein
+  // eigenes Kästchen (aff10b5One). Ältere Filings erwähnen den Plan, wenn überhaupt, in
+  // Fußnoten oder Anmerkungen – deshalb zählt beides.
+  const tradingPlan10b51Affirmed = doc.aff10b5One === true;
   const notes = (doc.footnotes || []).map((f) => String(f.text || '')).concat(String(doc.remarks || '')).join(' ');
   const accessionNo = doc.accessionNo || '';
 
@@ -151,7 +154,9 @@ function parseForm4(doc = {}) {
     isTenPercentOwner: Boolean(relationship.isTenPercentOwner),
     purchase: { ...purchase, holdingsIncreasePct },
     sale: { ...sale, holdingsDecreasePct },
-    mentions10b51: /10b5-?1/i.test(notes),
+    mentions10b51: tradingPlan10b51Affirmed || /10b5-?1/i.test(notes),
+    // Nur das Kästchen, ohne Textsuche – damit Auswertungen beide Quellen unterscheiden können.
+    tradingPlan10b51Affirmed,
     // Alle Transaktionscodes des Filings, z. B. ["P"] oder ["M", "S"].
     transactionCodes: [...new Set(transactions.map(code).filter(Boolean))],
     // Jede Aktien-Transaktion der Tabelle I für die Datenbank – auch Zuteilungen,
