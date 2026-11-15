@@ -98,6 +98,27 @@ const FILINGS = {
   '0001000000-26-000014': form4({ accessionNo: '0001000000-26-000014', ticker: 'FBCK', issuerCik: '1000014', transactions: purchaseLots() }),
   // Kauf, zu dem Finnhub kein Unternehmensprofil hat -> Marktkapitalisierung aus der Aktienzahl der SEC.
   '0001000000-26-000015': form4({ accessionNo: '0001000000-26-000015', ticker: 'CALC', issuerCik: '1000015', transactions: purchaseLots() }),
+  // Units aus einer Privatplatzierung: Aktien in Tabelle I, die Warrants in Tabelle II.
+  // Der Kurs liegt weit unter dem Insiderpreis -> kein Order-Vorschlag.
+  '0001000000-26-000016': {
+    ...form4({
+      accessionNo: '0001000000-26-000016', ticker: 'PIPX', issuerCik: '1000016',
+      transactions: [transaction({ code: 'P', shares: 100000, price: 5.0, after: 100000 })],
+      footnotes: [
+        { id: 'F1', text: 'Represents units purchased from the Issuer in a private placement pursuant to a Securities Purchase Agreement dated November 6, 2026. Each unit consists of one share of common stock and one warrant to purchase one share of common stock.' },
+        { id: 'F2', text: 'The warrants are exercisable immediately and expire on November 9, 2031.' },
+      ],
+    }),
+    derivativeTable: { transactions: [{
+      securityTitle: 'Warrants (right to buy)', conversionOrExercisePrice: 6.0, transactionDate: '2026-11-09',
+      coding: { formType: '4', code: 'P', equitySwapInvolved: false },
+      amounts: { shares: 100000, pricePerShare: 0, acquiredDisposedCode: 'A' },
+      exerciseDate: '2026-11-09', expirationDate: '2031-11-09',
+      underlyingSecurity: { title: 'Common Stock', shares: 100000 },
+      postTransactionAmounts: { sharesOwnedFollowingTransaction: 100000 },
+      ownershipNature: { directOrIndirectOwnership: 'D' },
+    }] },
+  },
 };
 
 // Dieses Filing lässt die sec-api im Mock mit HTTP 500 scheitern (Fehlerpfad).
@@ -159,8 +180,9 @@ function institutionalHoldings(ticker) {
   ];
 }
 
-// PRCY ist die teure Aktie der Testdaten (um 900 $), alle anderen kosten um 10 $.
-const basePrice = (symbol) => (symbol === 'PRCY' ? 900 : 10);
+// PRCY ist die teure Aktie der Testdaten (um 900 $), PIPX notiert weit unter dem
+// Platzierungspreis von 5 $, alle anderen kosten um 10 $.
+const basePrice = (symbol) => ({ PRCY: 900, PIPX: 3.5 }[symbol] || 10);
 
 // Zeitpunkt aller Testkurse: 10.11.2026, 16:00 Uhr New York = 22:00 Uhr Berlin.
 const QUOTE_TIME = Date.parse('2026-11-10T21:00:00Z') / 1000;
@@ -262,6 +284,107 @@ function chart(symbol) {
   };
 }
 
+// ------------------------------------------- SEC: Verzeichnis und Dokumente (EDGAR)
+
+// Das 8-K zur Privatplatzierung von PIPX, eingereicht drei Tage vor dem Form 4.
+const PIPE_FILING = { cik: '1000016', accessionNo: '0001000016-26-000020', filingDate: '2026-11-06' };
+const PIPE_FOLDER = `/Archives/edgar/data/${PIPE_FILING.cik}/${PIPE_FILING.accessionNo.replace(/-/g, '')}`;
+
+/** data.sec.gov/submissions: Verzeichnis der Filings (gekürzt). Nur für PIPX hinterlegt. */
+function secSubmissions(cik) {
+  if (cik !== '0001000016') return null;
+  const rows = [
+    ['4', '2026-11-10', '0001000000-26-000016', 'xslF345X06/ownership.xml', ''],
+    ['10-Q', '2026-11-09', '0001000016-26-000019', 'form10-q.htm', ''],
+    ['8-K', PIPE_FILING.filingDate, PIPE_FILING.accessionNo, 'form8-k.htm', '1.01,3.02,9.01'],
+    ['8-K', '2026-10-20', '0001000016-26-000015', 'form8-k.htm', '5.02,9.01'],
+  ];
+  return {
+    cik: '1000016', name: 'PIPX Corp', tickers: ['PIPX'],
+    filings: { recent: {
+      accessionNumber: rows.map((r) => r[2]), filingDate: rows.map((r) => r[1]), form: rows.map((r) => r[0]),
+      primaryDocument: rows.map((r) => r[3]), items: rows.map((r) => r[4]), primaryDocDescription: rows.map((r) => r[0]),
+    } },
+  };
+}
+
+const filler = (n) => Array.from({ length: n }, (_, i) => `clause${i % 40}`).join(' ');
+const PIPE_DOCUMENTS = {
+  'form8-k.htm': ['8-K', '8-K', `<html><body><div style="display:none"><ix:header>dei:EntityCentralIndexKey 0001000016</ix:header></div>
+    <p>UNITED STATES SECURITIES AND EXCHANGE COMMISSION</p><p>FORM 8-K</p>
+    <p><b>Item&nbsp;1.01 Entry into a Material Definitive Agreement.</b></p>
+    <p>On November 6, 2026, PIPX Corp entered into a Securities Purchase Agreement with certain investors, including members of management, for the sale of 2,000,000 units at a purchase price of $5.00 per unit in a private placement. Each unit consists of one share of common stock and one warrant to purchase one share of common stock at an exercise price of $6.00 per share. The warrants expire five years after issuance.</p>
+    <p>On the first anniversary of the closing, the exercise price of the warrants resets to the lower of $6.00 and the average market price, subject to a floor price of $2.50.</p>
+    <p><b>Item 3.02 Unregistered Sales of Equity Securities.</b></p>
+    <p>The Company had 10,000,000 shares of common stock outstanding before the offering. Under Nasdaq rules, the Company may not issue more than 19.99% of its outstanding shares (the &#8220;Exchange Cap&#8221;) upon exercise of the warrants without stockholder approval, which the Company will seek at its next annual meeting.</p>
+    <p><b>Item 9.01 Financial Statements and Exhibits.</b></p><p>10.1 Securities Purchase Agreement</p>
+    <p>SIGNATURES</p><p>Pursuant to the requirements of the Securities Exchange Act of 1934 ...</p></body></html>`],
+  'ex10-1.htm': ['EX-10.1', 'SECURITIES PURCHASE AGREEMENT', `<html><body><p>SECURITIES PURCHASE AGREEMENT</p><p>${filler(500)}</p>
+    <p>&#8220;Exchange Cap&#8221; shall mean 19.99% of the shares of Common Stock outstanding on the date of this Agreement.</p><p>${filler(500)}</p></body></html>`],
+  'ex4-1.htm': ['EX-4.1', 'FORM OF WARRANT', `<html><body><p>FORM OF COMMON STOCK PURCHASE WARRANT</p><p>${filler(300)}</p>
+    <p>Exercise Price. The exercise price per share of Common Stock under this Warrant shall be $6.00, subject to adjustment hereunder.</p></body></html>`],
+  'ex99-1.htm': ['EX-99.1', 'PRESS RELEASE', `<html><body><p>PIPX Corp Announces $10 Million Private Placement</p>
+    <p>The proceeds will fund the planned merger with Gamma Labs, which is expected to close in the second quarter of 2027.</p></body></html>`],
+  'logo.jpg': ['GRAPHIC', 'GRAPHIC', 'binary'],
+};
+
+/** www.sec.gov/Archives: Filing-Index und Dokumente, wie EDGAR sie ausliefert. */
+function secArchive(path) {
+  if (path === `${PIPE_FOLDER}/${PIPE_FILING.accessionNo}-index.htm`) {
+    const rows = Object.entries(PIPE_DOCUMENTS).map(([name, [type, description]], i) => `
+      <tr${i % 2 ? ' class="blueRow"' : ''}>
+        <td scope="row">${i + 1}</td>
+        <td scope="row">${description}</td>
+        <td scope="row"><a href="${i === 0 ? '/ix?doc=' : ''}${PIPE_FOLDER}/${name}">${name}</a></td>
+        <td scope="row">${type}</td>
+        <td scope="row">${12000 + i}</td>
+      </tr>`).join('');
+    return `<html><body><table class="tableFile" summary="Document Format Files">
+      <tr><th scope="col">Seq</th><th scope="col">Description</th><th scope="col">Document</th><th scope="col">Type</th><th scope="col">Size</th></tr>${rows}
+      </table></body></html>`;
+  }
+  const name = path.startsWith(`${PIPE_FOLDER}/`) ? path.slice(PIPE_FOLDER.length + 1) : null;
+  return name && PIPE_DOCUMENTS[name] ? PIPE_DOCUMENTS[name][2] : null;
+}
+
+// Was das Modell aus den Auszügen überträgt: [Feld, Wert, wörtliches Zitat].
+// Zwei Angaben sind mit Absicht falsch belegt; der Workflow muss sie verwerfen.
+const EXTRACTION = [
+  ['angebotsart', 'private placement', 'for the sale of 2,000,000 units at a purchase price of $5.00 per unit in a private placement'],
+  ['preisJeEinheit', '5', 'a purchase price of $5.00 per unit'],
+  ['einheit', 'one share and one warrant', 'Each unit consists of one share of common stock and one warrant to purchase one share of common stock'],
+  ['aktienImAngebot', '2000000', 'for the sale of 2,000,000 units'],
+  ['warrantsImAngebot', '2500000', 'Each unit consists of one share of common stock and one warrant'], // Zahl steht nicht im Zitat
+  ['warrantAusuebungspreis', '6', 'at an exercise price of $6.00 per share'],
+  ['warrantVerfall', '5', 'The warrants expire five years after issuance'],
+  ['closingDatum', '2026-11-09', 'The closing occurred on November 9, 2026'], // steht in keinem Dokument
+  ['resetBedingung', 'resets on the first anniversary to the lower of $6.00 and the average market price', 'the exercise price of the warrants resets to the lower of $6.00 and the average market price'],
+  ['resetUntergrenze', '2.5', 'subject to a floor price of $2.50'],
+  ['exchangeCapProzent', '19.99', 'may not issue more than 19.99% of its outstanding shares'],
+  ['hvZustimmung', 'stockholder approval at the next annual meeting', 'without stockholder approval, which the Company will seek at its next annual meeting'],
+  ['aktienVorher', '10000000', 'The Company had 10,000,000 shares of common stock outstanding before the offering'],
+  ['bruttoerloes', '10000000', 'PIPX Corp Announces $10 Million Private Placement'],
+  ['fusionPartner', 'Gamma Labs', 'the planned merger with Gamma Labs'],
+  ['fusionZweck', 'proceeds fund the merger', 'The proceeds will fund the planned merger with Gamma Labs'],
+  ['fusionZeitplan', 'second quarter of 2027', 'expected to close in the second quarter of 2027'],
+];
+
+/**
+ * Antwort auf die Auslese-Anfrage: alle Felder des Schemas, belegte mit der
+ * Nummer des Dokuments, in dem das Zitat steht – wie es das Modell tun soll.
+ */
+function extractionAnswer(body) {
+  const content = String(((body.messages || [])[0] || {}).content || '');
+  const documents = [...content.matchAll(/<dokument nr="(\d+)"[^>]*>\n([\s\S]*?)\n<\/dokument>/g)].map((m) => ({ nr: Number(m[1]), text: m[2] }));
+  const answer = Object.fromEntries(Object.keys(body.output_config.format.schema.properties)
+    .map((key) => [key, { gefunden: false, wert: '', zitat: '', dokument: 0 }]));
+  for (const [key, wert, zitat] of EXTRACTION) {
+    const doc = documents.find((d) => d.text.includes(zitat));
+    answer[key] = { gefunden: true, wert, zitat, dokument: doc ? doc.nr : 1 };
+  }
+  return answer;
+}
+
 const LLM_VERDICT = {
   signal: 'STARK',
   begruendung: 'Die CFO stockt ihren Bestand um ein Viertel auf <ohne> Verkaufsdruck.',
@@ -272,5 +395,5 @@ const LLM_VERDICT = {
 
 module.exports = {
   FILINGS, BROKEN_ACCESSION, streamFiling, history, institutionalHoldings, quoteSummary, chart, LLM_VERDICT,
-  finnhubQuote, finnhubProfile, finnhubMetric, secShares,
+  finnhubQuote, finnhubProfile, finnhubMetric, secShares, secSubmissions, secArchive, extractionAnswer, PIPE_FILING,
 };

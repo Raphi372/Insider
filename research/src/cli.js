@@ -9,6 +9,7 @@
 
 const path = require('node:path');
 const { createJournal, createServer } = require('./journal');
+const { createSecContext } = require('./sec-context');
 const { openDatabase } = require('./db');
 const { PriceClient } = require('./prices');
 const { SecApiClient, addDays } = require('./sec-api');
@@ -150,8 +151,20 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     journal.assertWritable();
     const db = openDatabase(path.join(dataDir, 'insider.db'));
     const port = Number(env.JOURNAL_PORT || 8090);
-    const context = { db, ...journalContext(env, (message) => console.log(`Hinweis: ${message}`)) };
-    const server = createServer(journal, (message) => console.log(`${new Date().toISOString()} ${message}`), context);
+    const stamp = (message) => console.log(`${new Date().toISOString()} ${message}`);
+    // Dokumente zu Privatplatzierungen, Warrants und Fusionen holt der Dienst
+    // direkt bei der SEC. Die SEC verlangt dafür Name und E-Mail im User-Agent.
+    const secContext = createSecContext({
+      userAgent: env.SEC_USER_AGENT,
+      dataBaseUrl: env.SEC_DATA_BASE_URL,
+      archivesBaseUrl: env.SEC_ARCHIVES_BASE_URL,
+      log: stamp,
+    });
+    const context = { db, secContext, ...journalContext(env, (message) => console.log(`Hinweis: ${message}`)) };
+    if (!secContext.hasContact) {
+      console.log('Hinweis: SEC_USER_AGENT enthält keine E-Mail-Adresse – Vertragsdetails zu Privatplatzierungen werden nicht abgerufen (siehe .env).');
+    }
+    const server = createServer(journal, stamp, context);
     server.listen(port, () => {
       const { filings, historyDays } = db.stats();
       console.log(`Protokoll-Dienst lauscht auf Port ${port}, Daten in ${dataDir} (${filings} Meldungen in der Datenbank, ${days(historyDays)} zurück; `

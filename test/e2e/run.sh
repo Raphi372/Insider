@@ -38,15 +38,15 @@ expect() { # expect "<Ausgabe>" "<erwarteter Text oder Muster>"
   fi
 }
 
-# Stand der Datenbank nach den Szenarien: vierzehn Meldungen aus dem Stream.
+# Stand der Datenbank nach den Szenarien: fünfzehn Meldungen aus dem Stream.
 if [ "$status" -eq 0 ]; then
   echo "--- research stats ---"
   stats=$(compose run --rm research stats) || status=$?
   printf '%s\n' "$stats"
-  expect "$stats" "Meldungen (Form 4): *14$"
-  expect "$stats" "mit Käufen (Code P): *10$"
+  expect "$stats" "Meldungen (Form 4): *15$"
+  expect "$stats" "mit Käufen (Code P): *11$"
   expect "$stats" "mit Verkäufen (Code S): *3$"
-  expect "$stats" "14 aus dem Stream, 0 nachgeladen"
+  expect "$stats" "15 aus dem Stream, 0 nachgeladen"
 fi
 
 # Ausfall der Datenbank: Der Dienst wird gestoppt, die Pipeline muss weiterlaufen.
@@ -57,17 +57,17 @@ if [ "$status" -eq 0 ]; then
   compose start journal
 fi
 
-# Nachladen: Die elf Käufe der Testdaten kommen über sec-api (Mock); zehn sind
-# schon gespeichert, der elfte ist der Kauf aus dem Ausfall-Test.
+# Nachladen: Die zwölf Käufe der Testdaten kommen über sec-api (Mock); elf sind
+# schon gespeichert, der zwölfte ist der Kauf aus dem Ausfall-Test.
 if [ "$status" -eq 0 ]; then
   echo "--- research backfill ---"
   backfill=$(compose run --rm research backfill --days 30 --to 2026-11-30) || status=$?
   printf '%s\n' "$backfill"
-  expect "$backfill" "11 Insiderkäufe von 2026-10-31 bis 2026-11-30 geladen, davon 1 neu in der Datenbank"
+  expect "$backfill" "12 Insiderkäufe von 2026-10-31 bis 2026-11-30 geladen, davon 1 neu in der Datenbank"
   stats=$(compose run --rm research stats) || status=$?
   printf '%s\n' "$stats"
-  expect "$stats" "Meldungen (Form 4): *15$"
-  expect "$stats" "14 aus dem Stream, 1 nachgeladen"
+  expect "$stats" "Meldungen (Form 4): *16$"
+  expect "$stats" "15 aus dem Stream, 1 nachgeladen"
 fi
 
 # Auswertung und Backtest laufen im selben Stack gegen die Mock-Daten.
@@ -75,7 +75,7 @@ if [ "$status" -eq 0 ]; then
   echo "--- research report ---"
   report=$(compose run --rm research report) || status=$?
   printf '%s\n' "$report"
-  expect "$report" "8 Signale protokolliert, 8 mit Kursdaten"
+  expect "$report" "9 Signale protokolliert, 9 mit Kursdaten"
   expect "$report" "| STARK "
   expect "$report" "| Order gesendet "
   expect "$report" "| Cluster (mehrere Insider) "
@@ -86,9 +86,9 @@ if [ "$status" -eq 0 ]; then
   backtest=$(compose run --rm research backtest --from 2026-11-01 --to 2026-11-30 --lookback-years 0) || status=$?
   printf '%s\n' "$backtest" | head -40
   expect "$backtest" "Offenmarktkauf (Code P), Kaufwert ab 25.000 "
-  expect "$backtest" "Insiderkäufe im Zeitraum (alle Größen): 11"
-  expect "$backtest" "davon über dem Filter: 9"
-  expect "$backtest" "auswertbar: 9"
+  expect "$backtest" "Insiderkäufe im Zeitraum (alle Größen): 12"
+  expect "$backtest" "davon über dem Filter: 10"
+  expect "$backtest" "auswertbar: 10"
   expect "$backtest" "| 20 Handelstage "
 fi
 

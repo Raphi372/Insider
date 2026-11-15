@@ -67,6 +67,8 @@ test('Insiderkauf: Analyse per Telegram, Order erst nach Klick auf den Button', 
   assert.ok(finnhub.every((r) => r.headers['x-finnhub-token'] === 'e2e-finnhub-key'));
   assert.equal((await requests('yahoo')).length, 0, 'liefert Finnhub, wird Yahoo nicht gefragt');
   assert.equal((await requests('secdata')).length, 0, 'die Aktienzahl der SEC wird nur gebraucht, wenn die Marktkapitalisierung fehlt');
+  assert.equal((await requests('secarchives')).length, 0, 'ohne Hinweis auf eine Kapitalmaßnahme keine SEC-Dokumente');
+  assert.equal((await requests('anthropic')).length, 1, 'ein reiner Marktkauf braucht nur die Bewertung');
 
   // -- Anthropic: aktuelles Modell, keine Sampling-Parameter, JSON-Schema
   const [llm] = await requests('anthropic');
@@ -105,7 +107,7 @@ test('Insiderkauf: Analyse per Telegram, Order erst nach Klick auf den Button', 
   });
   assert.deepEqual(entry.marketSources, [{ source: 'Finnhub', ok: true, reason: null }]);
   assert.equal(entry.history.priorPurchases, 1);
-  assert.deepEqual(entry.cluster, { windowDays: 14, otherInsiders: 0, insidersWithSamePurchase: 0, totalValueUsd: 0, purchases: [], historyDays: 0, complete: false });
+  assert.deepEqual(entry.cluster, { windowDays: 14, otherInsiders: 0, insidersWithSamePurchase: 0, insidersWithSamePrice: 0, totalValueUsd: 0, purchases: [], historyDays: 0, complete: false });
   assert.deepEqual(entry.order, { ticker: 'ACME', conid: 111, quantity: 490, entry: 10.2, stopLoss: 9.38, takeProfit: 11.73 });
   assert.equal(typeof entry.telegramMessageId, 'number', 'über die Nachrichten-ID wird der spätere Klick zugeordnet');
 
@@ -297,16 +299,63 @@ test('Hat Finnhub kein Unternehmensprofil, wird die Marktkapitalisierung aus der
     /<b>Markt:<\/b> Kurs 12,00 \$ \(\+17,6 % ggü\. Insiderpreis\) · Marktkap\. ca\. 1,44 Mrd\. \$ \(berechnet: Kurs × 120,0 Mio\. Aktien lt\. SEC, Stand 30\.09\.2026\) · Finnhub, 10\.11\. 22:00\n/,
   );
 
-  // Abgefragt wird die Aktienzahl dieses Unternehmens – mit einer Kennung, wie die SEC sie verlangt.
+  // Abgefragt wird die Aktienzahl dieses Unternehmens – mit der Kennung aus SEC_USER_AGENT (siehe e2e.env).
   const [shares] = await requests('secdata');
   assert.equal(shares.path, '/secdata/api/xbrl/companyconcept/CIK0001000015/dei/EntityCommonStockSharesOutstanding.json');
-  assert.equal(shares.headers['user-agent'], 'insider-pipeline/1.0');
+  assert.equal(shares.headers['user-agent'], 'Insider E2E e2e@example.com');
   assert.equal((await requests('yahoo')).length, 0);
 
   const entry = await loggedSignal('0001000000-26-000015');
   assert.equal(entry.market.marketCap, 1440000000);
   assert.deepEqual(entry.market.marketCapBasis, { sharesOutstanding: 120000000, asOf: '2026-09-30', source: 'SEC' });
   assert.equal(entry.derived.purchaseValuePctOfMarketCap, 0.0035);
+});
+
+test('Privatplatzierung: Bedingungen aus dem 8-K, Warrant-Wert, und kein Order-Vorschlag bei einem Kurs weit unter dem Insiderpreis', async () => {
+  await emit(streamFiling('0001000000-26-000016'));
+  const [message] = await waitForMessages(1, 90000);
+  const { text } = message.body;
+  const index = 'http://mock:8080/secarchives/Archives/edgar/data/1000016/000100001626000020/0001000016-26-000020-index.htm';
+
+  assert.match(text, /<b>Insiderkauf PIPX<\/b>/);
+  assert.match(text, /<b>Kauf:<\/b> 100\.000 Aktien zu Ø 5,00 \$ = 500\.000 \$\n/);
+  // Bedingungen aus dem 8-K und seinen Anlagen, mit Link zur Quelle.
+  assert.ok(text.includes('<b>Finanzierung:</b> Privatplatzierung · Units zu 5,00 $ (one share and one warrant) · Warrants zu 6,00 $ bis 09.11.2031'
+    + ' · Reset möglich (Untergrenze 2,50 $) · Exchange Cap 19,99 % bis zur Zustimmung der HV · Fusion mit Gamma Labs geplant'
+    + ` · Quelle: <a href="${index}">8-K vom 06.11.2026</a>\n`), text);
+  // Im Code gerechnet: Warrant-Wert als Spanne, effektiver Preis, Verwässerung (2 Mio. Aktien + 2 Mio. Warrants auf 10 Mio.).
+  assert.match(text, /<b>Einordnung:<\/b> Warrant ca\. \d+,\d{2}–\d+,\d{2} \$ wert \(Black-Scholes, Volatilität 60–140 %\) · effektiv ca\. \d+,\d{2}–\d+,\d{2} \$ je Aktie · Verwässerung bis ca\. 40,0 %\n/);
+  // Kurs 4,20 $ liegt unter dem Stop-Loss von 4,60 $: Die Bracket-Order würde sofort kaufen und wieder verkaufen.
+  assert.match(text, /<b>Markt:<\/b> Kurs 4,20 \$ \(−16,0 % ggü\. Insiderpreis\)/);
+  assert.match(text, /<i>Kurs 4,20 \$ liegt 16,0 % unter dem Insiderpreis und schon unter dem Stop-Loss \(4,60 \$\): Die Order würde sofort kaufen und gleich wieder verkaufen – kein Order-Vorschlag\.<\/i>/);
+  assert.deepEqual(buttons(message), [], 'kein Order-Button');
+
+  // SEC direkt und kostenlos: Verzeichnis bei data.sec.gov, Index und Dokumente im
+  // EDGAR-Archiv – mit Kontaktadresse im User-Agent, ohne Abruf bei sec-api.io.
+  const directory = await requests('secdata');
+  assert.deepEqual(directory.map((r) => r.path), ['/secdata/submissions/CIK0001000016.json']);
+  const archive = await requests('secarchives');
+  assert.deepEqual(archive.map((r) => r.path.split('/').pop()), ['0001000016-26-000020-index.htm', 'form8-k.htm', 'ex10-1.htm', 'ex4-1.htm', 'ex99-1.htm'],
+    'Kaufvertrag vor Warrant vor Pressemitteilung; Grafiken nicht');
+  assert.ok([...directory, ...archive].every((r) => r.headers['user-agent'] === 'Insider E2E e2e@example.com'));
+  assert.deepEqual((await requests('sec')).map((r) => r.body.query.split(' ')[0]), ['accessionNo:"0001000000-26-000016"', 'issuer.cik:1000016', 'holdings.ticker:PIPX'],
+    'nicht mehr sec-api-Abrufe als bisher');
+
+  // Erst liest die KI die Bedingungen aus, dann bewertet sie den Kauf mit den geprüften Angaben.
+  const [extract, analysis] = await requests('anthropic');
+  assert.ok(extract.body.output_config.format.schema.properties.exchangeCapProzent);
+  assert.match(extract.body.messages[0].content, /<dokument nr="1" form="8-K" eingereicht="2026-11-06" typ="8-K">\nItem 1\.01 Entry into a Material Definitive Agreement\./);
+  assert.ok(!extract.body.messages[0].content.includes('EntityCentralIndexKey'), 'der XBRL-Kopf gehört nicht in den Auszug');
+  assert.match(analysis.body.messages[0].content, /"financing": \{/);
+  assert.match(analysis.body.system, /"placement\.detected" true/);
+
+  // Im Protokoll: alle geprüften Angaben, die verworfenen und die Rechnung.
+  const entry = await loggedSignal('0001000000-26-000016');
+  assert.equal(entry.financing.terms.exchangeCapProzent.value, 19.99);
+  assert.deepEqual(entry.financing.rejected, ['closingDatum', 'warrantsImAngebot'], 'Zitat fehlt im Dokument bzw. Zahl fehlt im Zitat');
+  assert.deepEqual([entry.financing.dilution.maxPct, entry.financing.dilution.warrantSharesDerived], [40, true]);
+  assert.deepEqual(entry.form4.placement.reasons, ['Securities Purchase Agreement', 'Privatplatzierung', 'Units', 'Kauf direkt vom Unternehmen', 'Warrants erworben (Tabelle II)']);
+  assert.equal(entry.order, null);
 });
 
 test('Fallen alle Kursquellen und Anthropic aus, kommt die Meldung trotzdem – mit dem Grund und ohne KI-Einstufung', async () => {
@@ -321,6 +370,7 @@ test('Fallen alle Kursquellen und Anthropic aus, kommt die Meldung trotzdem – 
   assert.match(text, /<b>Historie:<\/b> 1 frühere Käufe, 1 Verkäufe$/m, 'ohne Kurs keine Erfolgsquote');
   assert.match(text, /⚠️ KI-Analyse nicht verfügbar/);
   assert.equal(buttons(message)[0].callback_data, 'o|DOWN|333|490|10.2|9.38|11.73');
+  assert.match(text, /⚠️ Aktueller Kurs unbekannt – prüfe vor dem Senden, ob er über dem Stop-Loss liegt\.\n/, 'ohne Kurs bleibt der Vorschlag, mit Hinweis');
   assert.ok(!text.includes(LLM_VERDICT.begruendung));
 
   const entry = await loggedSignal('0001000000-26-000006');

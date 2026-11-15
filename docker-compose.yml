@@ -64,7 +64,10 @@ services:
       ORDER_QUANTITY: ${ORDER_QUANTITY:-}
       STOP_LOSS_PCT: ${STOP_LOSS_PCT:-8}
       TAKE_PROFIT_PCT: ${TAKE_PROFIT_PCT:-15}
+      ORDER_MAX_PRICE_GAP_PCT: ${ORDER_MAX_PRICE_GAP_PCT:-5}
       ORDER_BUTTON_MAX_AGE_HOURS: ${ORDER_BUTTON_MAX_AGE_HOURS:-24}
+      # Risikoloser Zins für den Wert von Warrants (Black-Scholes), in Prozent.
+      RISK_FREE_RATE_PCT: ${RISK_FREE_RATE_PCT:-4}
       # Die INSIDER_*-Variablen leiten Aufrufe im End-to-End-Test auf den Mock um.
       ANTHROPIC_BASE_URL: ${INSIDER_ANTHROPIC_BASE_URL:-https://api.anthropic.com}
       SEC_API_BASE_URL: ${INSIDER_SEC_API_BASE_URL:-https://api.sec-api.io}
@@ -120,6 +123,11 @@ services:
       CLUSTER_DAYS: ${CLUSTER_DAYS:-14}
       SELL_ALERT_SCOPE: ${SELL_ALERT_SCOPE:-orders}
       SELL_ALERT_LOOKBACK_DAYS: ${SELL_ALERT_LOOKBACK_DAYS:-365}
+      # Dokumente zu Privatplatzierungen (8-K samt Anlagen) holt der Dienst
+      # direkt bei der SEC. Die SEC verlangt Name und E-Mail im User-Agent.
+      SEC_USER_AGENT: ${SEC_USER_AGENT:-insider-pipeline/1.0}
+      SEC_DATA_BASE_URL: ${INSIDER_SEC_DATA_BASE_URL:-https://data.sec.gov}
+      SEC_ARCHIVES_BASE_URL: ${INSIDER_SEC_ARCHIVES_BASE_URL:-https://www.sec.gov}
     volumes:
       - ./data:/data
     healthcheck:

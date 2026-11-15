@@ -81,7 +81,7 @@ function readBody(req, limitBytes = 2 * 1024 * 1024) {
  * arbeitet der Dienst nur als Signal-Protokoll.
  */
 function createServer(journal, log = () => {}, context = {}) {
-  const { db = null, clusterDays = 14, sellAlert = {} } = context;
+  const { db = null, clusterDays = 14, sellAlert = {}, secContext = null } = context;
 
   return http.createServer(async (req, res) => {
     const send = (status, body) => {
@@ -135,6 +135,15 @@ function createServer(journal, log = () => {}, context = {}) {
           log(`Verkaufswarnung: ${signal.insiderName} verkauft ${signal.ticker} (${signal.accessionNo})`);
         }
         return send(201, { ...result, cluster, sellAlert: alert });
+      }
+
+      // Zugehörige SEC-Dokumente zu einem Form 4 – etwa der 8-K mit den
+      // Bedingungen einer Privatplatzierung. Holt direkt bei der SEC (kostenlos)
+      // und liefert kurze Auszüge für die Auswertung im Workflow.
+      if (route === 'POST /sec-context') {
+        if (!secContext) return send(503, { error: 'SEC-Abruf nicht eingerichtet' });
+        const request = await readBody(req);
+        return send(200, await secContext.lookup(request || {}));
       }
 
       if (route === 'POST /signals') {

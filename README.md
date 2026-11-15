@@ -17,6 +17,7 @@ flowchart LR
   B -- Webhook --> N[n8n-Workflow]
   N --> S1[sec-api.io REST<br/>Form 4, Historie, 13F]
   N --> Y[Marktdaten<br/>Finnhub, ersatzweise Yahoo]
+  N -- "bei Privatplatzierung" --> E[SEC EDGAR<br/>8-K und Anlagen]
   N --> C[Claude Haiku 5.5<br/>Einstufung + Begründung]
   N -- Nachricht mit Button --> TG
   N -- Bracket-Order nach Klick --> I[IBKR-Gateway<br/>Paper-Konto]
@@ -29,10 +30,11 @@ flowchart LR
 2. Der **Workflow** lädt die Transaktionen des Filings und legt sie in der **Datenbank** ab – jedes Form 4, auch Verkäufe und kleine Käufe. Verkauft dabei ein Insider, dessen Kauf du gefolgt bist, bekommst du eine **Verkaufswarnung**.
 3. Weiter geht es nur mit Offenmarktkäufen (Transaction Code `P`, Preis > 0) im Wert von mindestens `MIN_PURCHASE_VALUE_USD`, also 25.000 $, wenn du nichts anderes einstellst.
 4. Für jeden solchen Kauf holt er die bisherigen Transaktionen dieses Insiders, die jüngsten 13F-Meldungen institutioneller Halter, Marktdaten (Kurs und Marktkapitalisierung von Finnhub, ersatzweise von Yahoo Finance) und aus der Datenbank die Käufe anderer Insider desselben Unternehmens (**Cluster**).
-5. Alle Kennzahlen (Volumen, Bestandsveränderung, Erfolgsquote früherer Käufe, Short Interest …) berechnet der Workflow selbst. **Claude** bekommt sie fertig vorgelegt und liefert nur die Einstufung `SCHWACH`/`MITTEL`/`STARK` mit Begründung. In der Nachricht stehen deshalb keine Zahlen, die das Modell erfunden haben könnte.
-6. Du bekommst eine **Telegram-Nachricht** mit Analyse, Order-Vorschlag und zwei Buttons.
-7. Erst ein Tipp auf **„Order ans Paper-Konto senden“** schickt die Bracket-Order (Kauf-Limit zum Insiderpreis, Take-Profit, Stop-Loss) an IBKR. Das Ergebnis kommt als zweite Nachricht.
-8. Jedes Signal und jede Entscheidung landet im **Signal-Protokoll**. Damit lässt sich später prüfen, was die Signale tatsächlich wert waren (siehe [Signal-Protokoll und Backtest](#signal-protokoll-und-backtest)).
+5. Deutet das Form 4 auf eine **Kapitalmaßnahme** hin – etwa Units aus einer Privatplatzierung mit Warrants –, holt der Workflow die zugehörigen SEC-Dokumente (8-K samt Anlagen) und lässt Claude die Bedingungen mit wörtlichen Zitaten auslesen. Warrant-Wert, effektiven Preis und Verwässerung rechnet er selbst (siehe [Privatplatzierungen und Warrants](#privatplatzierungen-und-warrants)).
+6. Alle Kennzahlen (Volumen, Bestandsveränderung, Erfolgsquote früherer Käufe, Short Interest …) berechnet der Workflow selbst. **Claude** bekommt sie fertig vorgelegt und liefert nur die Einstufung `SCHWACH`/`MITTEL`/`STARK` mit Begründung. In der Nachricht stehen deshalb keine Zahlen, die das Modell erfunden haben könnte.
+7. Du bekommst eine **Telegram-Nachricht** mit Analyse, Order-Vorschlag und zwei Buttons. Liegt der Kurs deutlich unter dem Insiderpreis, gibt es keinen Order-Vorschlag – die Order würde sofort ausgeführt und der Stop-Loss womöglich gleich danach.
+8. Erst ein Tipp auf **„Order ans Paper-Konto senden“** schickt die Bracket-Order (Kauf-Limit zum Insiderpreis, Take-Profit, Stop-Loss) an IBKR. Das Ergebnis kommt als zweite Nachricht.
+9. Jedes Signal und jede Entscheidung landet im **Signal-Protokoll**. Damit lässt sich später prüfen, was die Signale tatsächlich wert waren (siehe [Signal-Protokoll und Backtest](#signal-protokoll-und-backtest)).
 
 Fällt eine Datenquelle aus (Finnhub, Yahoo, 13F, Historie, Claude, die Datenbank), kommt die Meldung trotzdem und nennt die Lücke – bei den Marktdaten auch den Grund. Bricht der Workflow ganz ab, meldet ein Error Trigger den Fehler per Telegram.
 
@@ -44,6 +46,7 @@ Fällt eine Datenquelle aus (Finnhub, Yahoo, 13F, Historie, Claude, die Datenban
 | [sec-api.io](https://sec-api.io/pricing) | Stream, Form 4, 13F | Zum Ausprobieren genügt der kostenlose Schlüssel (100 Abrufe insgesamt, ohne Stream). Für den Dauerbetrieb braucht es den Tarif „Personal & Startups“, der die Stream-API enthält |
 | [Claude Console](https://platform.claude.com/) | Claude | API-Key und etwas Prepaid-Guthaben |
 | [Finnhub](https://finnhub.io/register) | Kurs, Marktkapitalisierung, Kennzahlen | Kostenloser Schlüssel für private Nutzung. Optional – ohne ihn fragt der Workflow nur Yahoo Finance, und das blockt die Abrufe meist (siehe [Marktdaten](#marktdaten)) |
+| [SEC EDGAR](https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data) | Vertragsdetails zu Privatplatzierungen, Aktienzahl | Kostenlos und ohne Schlüssel. Die SEC verlangt eine Kennung mit Name und E-Mail-Adresse (`SEC_USER_AGENT`) |
 | [Telegram](https://telegram.org/) | Benachrichtigung | Bot über @BotFather, eigene ID über @userinfobot |
 | [Interactive Brokers](https://www.interactivebrokers.eu/) | Paper-Trading | Paper-Konto aktivieren; Kontonummer beginnt mit `D` (z. B. `DU1234567`). Die Schnittstelle für Orders verlangt laut IBKR auch dafür ein vollständig eröffnetes und eingezahltes Live-Konto vom Typ „IBKR Pro“. Ohne IBKR läuft alles außer dem Order-Button |
 
@@ -59,9 +62,11 @@ Fällt eine Datenquelle aus (Finnhub, Yahoo, 13F, Historie, Claude, die Datenban
 
 2. **Kursdaten-Schlüssel anlegen** (kostenlos, empfohlen): Auf <https://finnhub.io/register> ein Konto anlegen. Der Schlüssel steht danach im Dashboard unter „API Key“. Trage ihn in `.env` hinter `FINNHUB_API_KEY=` ein. Ohne ihn steht in den Meldungen meist „Marktdaten nicht verfügbar“.
 
-3. **Telegram vorbereiten:** Schreibe deinem Bot einmal `/start`. Vorher darf er dir keine Nachrichten senden.
+3. **SEC-Kennung eintragen** (empfohlen): Trage in `.env` hinter `SEC_USER_AGENT=` deinen Namen und deine E-Mail-Adresse ein, z. B. `SEC_USER_AGENT=Max Mustermann max@example.com`. Die SEC verlangt das für automatische Abrufe; die Angabe geht nur an die SEC. Ohne sie fehlen bei Privatplatzierungen die Vertragsdetails.
 
-4. **Starten**
+4. **Telegram vorbereiten:** Schreibe deinem Bot einmal `/start`. Vorher darf er dir keine Nachrichten senden.
+
+5. **Starten**
 
    ```bash
    docker compose up -d
@@ -69,22 +74,22 @@ Fällt eine Datenquelle aus (Finnhub, Yahoo, 13F, Historie, Claude, die Datenban
 
    Der erste Start lädt rund 4 GB an Images. Dabei legt ein Hilfscontainer (`n8n-init`) deine Schlüssel als verschlüsselte n8n-Credentials an, importiert den Workflow und veröffentlicht ihn.
 
-5. **n8n öffnen:** <http://localhost:5678> (auch in Safari) – beim ersten Aufruf legst du ein lokales Admin-Konto an. Der Workflow „Insider Pipeline“ ist bereits vorhanden und steht auf „Published“.
+6. **n8n öffnen:** <http://localhost:5678> (auch in Safari) – beim ersten Aufruf legst du ein lokales Admin-Konto an. Der Workflow „Insider Pipeline“ ist bereits vorhanden und steht auf „Published“.
 
-6. **Prüfen, ob alles verbunden ist**
+7. **Prüfen, ob alles verbunden ist**
 
    ```bash
    docker compose logs bridge        # erwartet: "sec-api-Stream verbunden"
    docker compose logs ibkr-gateway  # erwartet: "Gateway running and authenticated"
    ```
 
-7. **Datenbank vorfüllen** (empfohlen), damit Cluster-Käufe vom ersten Tag an erkannt werden:
+8. **Datenbank vorfüllen** (empfohlen), damit Cluster-Käufe vom ersten Tag an erkannt werden:
 
    ```bash
    docker compose run --rm research backfill --days 30
    ```
 
-8. **Testlauf mit einem echten Filing** (siehe nächster Abschnitt).
+9. **Testlauf mit einem echten Filing** (siehe nächster Abschnitt).
 
 ### Aktualisieren
 
@@ -118,7 +123,7 @@ Nach wenigen Sekunden sollte die Telegram-Nachricht eintreffen. Tippe auf den Bu
 
 Dieser Testlauf ruft die echten APIs auf. **Er ist der erste Lauf gegen die echten Dienste überhaupt** – siehe [Was noch nicht geprüft ist](#was-noch-nicht-geprüft-ist).
 
-Jeder Testlauf kostet Abrufe bei sec-api.io: vier ohne Angabe (einer für die Suche), drei mit einer Accession Number. Die Nummer des zuletzt gemeldeten Signals findest du so:
+Jeder Testlauf kostet Abrufe bei sec-api.io: vier ohne Angabe (einer für die Suche), drei mit einer Accession Number. Die Dokumente zu einer Privatplatzierung kommen kostenlos direkt von der SEC und kosten keine weiteren sec-api-Abrufe. Die Nummer des zuletzt gemeldeten Signals findest du so:
 
 ```bash
 grep -o '"accessionNo":"[^"]*"' data/signals.jsonl | tail -1
@@ -136,28 +141,47 @@ curl -s -H "X-Finnhub-Token: $KEY" "https://finnhub.io/api/v1/stock/profile2?sym
 
 Erwartet wird beim ersten Abruf ein Kurs im Feld `c` und ein Zeitstempel in `t`, beim zweiten unter anderem `marketCapitalization` (in Millionen). `{"error":"Invalid API key"}` heißt: Schlüssel prüfen. Lauter Nullen beim Kurs oder `{}` beim Profil heißen: Finnhub kennt dieses Symbol nicht – dann springen im Workflow Yahoo bzw. die Aktienzahl der SEC ein.
 
+### Privatplatzierung prüfen
+
+Ob die SEC deine Kennung annimmt, zeigt ein Abruf ohne sec-api-Abruf. Er liest `SEC_USER_AGENT` aus der `.env`:
+
+```bash
+UA=$(grep '^SEC_USER_AGENT=' .env | cut -d= -f2-)
+curl -s -o /dev/null -w '%{http_code}\n' -A "$UA" https://www.sec.gov/Archives/edgar/data/1468929/000149315226051238/0001493152-26-051238-index.htm
+```
+
+`200` heißt: alles in Ordnung. `403` heißt: Die Kennung fehlt oder enthält keine E-Mail-Adresse.
+
+Danach ein Testlauf mit einem Form 4 aus einer Privatplatzierung, etwa dem Kauf bei NexGel vom 10.11.2026 (drei sec-api-Abrufe):
+
+```bash
+docker compose exec bridge node src/replay.js 0001493152-26-051920
+```
+
+Die Nachricht sollte die Zeilen „Finanzierung:“ und „Einordnung:“ enthalten. Vergleiche die Angaben mit dem verlinkten 8-K.
+
 ### Automatische Tests
 
 Diese Tests brauchen keine Zugangsdaten und rufen keine echten APIs auf.
 
 ```bash
 sh test/e2e/run.sh                          # End-to-End: echtes n8n, alle externen Dienste als Mock (ca. 6 Minuten)
-node --test test/unit/                      # Logik der Code-Nodes, Filter und Marktdaten (Node.js >= 22.13)
+node --test test/unit/                      # Logik der Code-Nodes, Filter, Marktdaten, Finanzierung (Node.js >= 22.13)
 cd bridge && npm ci && npm test             # Bridge
-cd research && npm test                     # Datenbank, Protokoll, Auswertung, Backtest (Node.js >= 22.13)
+cd research && npm test                     # Datenbank, Protokoll, SEC-Dokumente, Auswertung, Backtest (Node.js >= 22.13)
 ```
 
-Der End-to-End-Test startet n8n mit genau dem Workflow aus diesem Repository und spielt 16 Szenarien durch, darunter die aus Teil 14 der ursprünglichen Anleitung: Kauf mit Analyse und Order nach Klick, Cluster-Kauf eines zweiten Insiders, Verkaufswarnung (genau einmal, und nur nach gesendeter Order), Verkauf / Preis 0 / zu kleiner Kaufwert (keine Meldung, aber in der Datenbank), wenige teure Aktien, Marktdaten von Finnhub, gedrosseltes Finnhub mit Yahoo als Ersatz, berechnete Marktkapitalisierung, Ausfall aller Kursquellen und von Claude, unbekannter Kontrakt, verzögert indexiertes Filing, fremde und veraltete Klicks, von IBKR abgelehnte Order, der Fehlerpfad und Webhook-Aufrufe ohne Secret. Danach wird der Protokoll-Dienst gestoppt, um einen Ausfall der Datenbank durchzuspielen, es laufen Nachladen, Auswertung und Backtest gegen die Mock-Daten, und zum Schluss startet n8n ohne Finnhub-Schlüssel neu: Dann muss alles wie bisher über Yahoo laufen.
+Der End-to-End-Test startet n8n mit genau dem Workflow aus diesem Repository und spielt 17 Szenarien durch, darunter die aus Teil 14 der ursprünglichen Anleitung: Kauf mit Analyse und Order nach Klick, Cluster-Kauf eines zweiten Insiders, Verkaufswarnung (genau einmal, und nur nach gesendeter Order), Verkauf / Preis 0 / zu kleiner Kaufwert (keine Meldung, aber in der Datenbank), wenige teure Aktien, Marktdaten von Finnhub, gedrosseltes Finnhub mit Yahoo als Ersatz, berechnete Marktkapitalisierung, Privatplatzierung mit Warrants (Bedingungen aus nachgebildeten SEC-Dokumenten, kein Order-Vorschlag bei einem Kurs weit unter dem Insiderpreis), Ausfall aller Kursquellen und von Claude, unbekannter Kontrakt, verzögert indexiertes Filing, fremde und veraltete Klicks, von IBKR abgelehnte Order, der Fehlerpfad und Webhook-Aufrufe ohne Secret. Danach wird der Protokoll-Dienst gestoppt, um einen Ausfall der Datenbank durchzuspielen, es laufen Nachladen, Auswertung und Backtest gegen die Mock-Daten, und zum Schluss startet n8n ohne Finnhub-Schlüssel neu: Dann muss alles wie bisher über Yahoo laufen.
 
 ## Datenbank, Cluster und Verkaufswarnung
 
-Der Dienst `journal` speichert **jedes** Form 4, das über den Stream kommt, in `data/insider.db` (SQLite) – nicht nur die Käufe, die als Signal gemeldet werden, sondern auch Verkäufe, Zuteilungen, Optionsausübungen und Käufe unter dem Schwellenwert. Abgelegt wird jede einzelne Transaktion mit Aktien (Tabelle I des Formulars); Derivate wie Optionen (Tabelle II) bleiben außen vor.
+Der Dienst `journal` speichert **jedes** Form 4, das über den Stream kommt, in `data/insider.db` (SQLite) – nicht nur die Käufe, die als Signal gemeldet werden, sondern auch Verkäufe, Zuteilungen, Optionsausübungen und Käufe unter dem Schwellenwert. Abgelegt wird jede einzelne Transaktion mit Aktien (Tabelle I des Formulars); Derivate wie Optionen und Warrants (Tabelle II) bleiben in der Datenbank außen vor. Für die Analyse liest der Workflow sie trotzdem (siehe [Privatplatzierungen und Warrants](#privatplatzierungen-und-warrants)).
 
 Darauf bauen zwei Funktionen auf:
 
 - **Cluster.** Bei jedem Signal prüft die Pipeline, ob in den `CLUSTER_DAYS` Tagen davor (Standard 14) andere Insider desselben Unternehmens am Markt gekauft haben – egal, wie groß deren Käufe waren. Die Telegram-Nachricht nennt sie in der Zeile „Cluster“, Claude bekommt sie für die Einstufung vorgelegt, und sie stehen im Signal-Protokoll. Ob Cluster-Käufe bei dir tatsächlich besser laufen als Einzelkäufe, zeigt die Auswertung (`research report`) in einem eigenen Abschnitt.
 
-  Verbundene Meldepflichtige – etwa ein Fonds und sein Verwalter – melden denselben Kauf mitunter in getrennten Formularen. Das sieht wie ein Cluster aus, ist aber nur ein Käufer. Stimmen Stückzahl und Kaufwert exakt mit dem gemeldeten Kauf überein, kennzeichnet die Nachricht das mit ⚠️, und Claude wird darauf hingewiesen. In Auswertung und Backtest zählen solche Fälle trotzdem als Cluster.
+  Verbundene Meldepflichtige – etwa ein Fonds und sein Verwalter – melden denselben Kauf mitunter in getrennten Formularen. Das sieht wie ein Cluster aus, ist aber nur ein Käufer. Stimmen Stückzahl und Kaufwert exakt mit dem gemeldeten Kauf überein, kennzeichnet die Nachricht das mit ⚠️, und Claude wird darauf hingewiesen. Kauft ein anderer Insider zum selben Preis je Aktie (auf den Cent genau), stammt der Kauf meist aus derselben Platzierung des Unternehmens. Die Nachricht vermerkt das mit „gleicher Preis“, denn auch das ist keine unabhängige Bestätigung. In Auswertung und Backtest zählen beide Fälle trotzdem als Cluster.
 - **Verkaufswarnung.** Verkauft ein Insider am Markt (Code `S`), dessen Kauf dir gemeldet wurde und zu dem du die Order gesendet hast, bekommst du eine Telegram-Nachricht mit Verkauf, Restbestand und dem früheren Kauf. Verkauft wird dabei nichts automatisch. Mit `SELL_ALERT_SCOPE=signals` kommt die Warnung nach jedem gemeldeten Kauf, auch ohne Order; `off` schaltet sie ab. Erwähnt das Filing einen vorab festgelegten Handelsplan (Rule 10b5-1), steht das dabei – solche Verkäufe sagen wenig aus.
 
 Die Warnung entsteht nur aus Meldungen, die über den Stream eintreffen, während die Pipeline läuft. Was in einer Pause gemeldet wurde, holt sie nicht nach.
@@ -232,6 +256,44 @@ Geprüft am 15.11.2026 auf den Seiten der Anbieter. Der Bedarf: drei Abrufe je M
 
 Die Bedingungen ändern sich; maßgeblich sind die Seiten der Anbieter. Der Schlüssel liegt nur in deiner `.env` und in n8n als verschlüsseltes Credential. Er wird als Header gesendet und steht weder in einer Adresse noch im Workflow.
 
+## Privatplatzierungen und Warrants
+
+Nicht jeder Kauf mit Code `P` ist ein Kauf am offenen Markt. Zeichnet ein Insider Units aus einer Privatplatzierung, ist der Preis ausgehandelt, und oft gehören Warrants, eine geänderte Wandelanleihe oder eine geplante Fusion dazu. Ohne diese Bedingungen lässt sich der Kauf kaum einordnen.
+
+**Wann:** Der Workflow erkennt solche Käufe am Form 4 – an Begriffen in den Fußnoten („Securities Purchase Agreement“, „private placement“, „each unit consists of …“, „purchased from the Issuer“ und ähnliche) oder an Warrants und Wandelpapieren, die in Tabelle II erworben wurden. Fußnoten und Anmerkungen gehen dafür vollständig an Claude; früher wurde jede Fußnote nach 400 Zeichen abgeschnitten. Für reine Marktkäufe ändert sich nichts.
+
+**Woher:** Der Dienst `journal` sucht im Verzeichnis des Unternehmens bei der SEC (`data.sec.gov`) die Filings der 30 Tage vor dem Form 4: 8-Ks zu wesentlichen Verträgen, Übernahmen, Finanzverbindlichkeiten und der Ausgabe nicht registrierter Aktien (Items 1.01, 2.01, 2.03, 3.02, 3.03, 8.01), Fusionsunterlagen (425, S-4, Proxy), Prospekte und Registrierungen. Aus dem Archiv (`www.sec.gov`) lädt er das Hauptdokument und bis zu vier Anlagen: Kaufvertrag (EX-10), Warrant oder Anleihe (EX-4), Pressemitteilung (EX-99) und Fusionsvertrag (EX-2). Daraus schneidet er die passenden Items und die Abschnitte um Begriffe wie „Exchange Cap“, „exercise price“ oder „conversion price“ heraus, zusammen höchstens 30.000 Zeichen. Das kostet keinen sec-api-Abruf. Die SEC verlangt dafür eine Kennung mit E-Mail-Adresse (`SEC_USER_AGENT`).
+
+**Auslesen und Prüfen:** Claude überträgt die Bedingungen in 25 feste Felder, darunter Preis je Unit, Ausübungspreis, Reset-Klausel, Exchange Cap, Wandlungspreis, Zweck und Zeitplan der Fusion – jede Angabe mit wörtlichem Zitat. Der Workflow übernimmt nur, was er belegen kann:
+
+- Das Zitat steht so im genannten Dokument.
+- Eine Zahl steht im Zitat.
+- Ein Datum ist nicht bloß errechnet.
+
+Verworfene Angaben stehen im Signal-Protokoll unter `financing.rejected`.
+
+**Rechnen:** Den Rest rechnet der Workflow selbst:
+
+- **Wert eines Warrants nach Black-Scholes:** Kurs, Ausübungspreis und Laufzeit stammen aus dem Form 4, ersatzweise aus dem Dokument. Dazu kommen der Zins aus `RISK_FREE_RATE_PCT` und drei angenommene Volatilitäten (60, 100 und 140 %). Daraus ergibt sich eine Spanne.
+- **Effektiver Preis je Aktie:** der Preis je Unit abzüglich der Warrants.
+- **Höchstmögliche Verwässerung:** neue Aktien, Warrants und Wandlung der Anleihe; im ungünstigsten Fall mit Reset auf die Untergrenze. Nennt das Dokument die Zahl der Warrants nicht, gilt die Zusammensetzung der Units aus dem Form 4.
+
+```
+Finanzierung: Privatplatzierung · Units zu 5,50 $ (one share and one warrant) · Warrants zu 6,00 $ bis 10.11.2031 · Reset möglich (Untergrenze 2,00 $) · Exchange Cap 19,99 % bis zur Zustimmung der HV · Quelle: 8-K vom 12.11.2026
+Einordnung: Warrant ca. 1,70–3,37 $ wert (Black-Scholes, Volatilität 60–140 %) · effektiv ca. 2,13–3,80 $ je Aktie · Verwässerung bis ca. 33,3 %
+```
+
+(Beispiel mit erfundenen Vertragsdaten.) Fehlt etwas, sagt die Zeile warum, etwa „Vertragsdetails nicht ermittelt: Dokumente nicht abgerufen: SEC_USER_AGENT enthält keine E-Mail-Adresse“. Bei einer Privatplatzierung kommt die Meldung geschätzt 5 bis 15 Sekunden später; die Auslese kostet weniger als einen Cent.
+
+**Grenzen:**
+
+- Black-Scholes mit angenommener Volatilität ist für Warrants mit Reset-Klausel nur eine grobe Näherung.
+- Was das Unternehmen noch nicht veröffentlicht hat, kann keine Meldung kennen. Ein 8-K darf bis zu vier Geschäftstage nach dem Vertrag kommen, ein Form 4 schon nach zwei. Nachträge für später eingereichte Dokumente gibt es noch nicht.
+
+### Kein Order-Vorschlag bei Kurs weit unter dem Insiderpreis
+
+Limit, Stop-Loss und Take-Profit hängen am Insiderpreis. Liegt der aktuelle Kurs deutlich darunter, würde die Kauforder sofort zum Marktpreis ausgeführt, und ein Stop-Loss über dem Kurs löste gleich danach aus. Liegt der Kurs mehr als `ORDER_MAX_PRICE_GAP_PCT` Prozent (Standard 5, höchstens `STOP_LOSS_PCT`) unter dem Insiderpreis, schlägt die Nachricht deshalb keine Order vor und nennt den Grund. Ist kein Kurs bekannt, bleibt der Vorschlag, mit dem Hinweis, den Kurs vor dem Senden selbst zu prüfen. Geprüft wird beim Erstellen der Nachricht, nicht beim Tippen auf den Button.
+
 ## Signal-Protokoll und Backtest
 
 > **Bekanntes Problem:** Auswertung und Backtest (`research report`, `research backtest`) holen ihre Tageskurse von Yahoos Chart-Schnittstelle. Sie ist vom selben Block betroffen wie die Marktdaten (HTTP 429, gemessen am 14.11.2026). Bis das behoben ist, können beide Befehle scheitern oder für viele Titel „keine Kursdaten“ melden. Die Telegram-Meldungen sind davon nicht betroffen.
@@ -294,10 +356,12 @@ Alle Einstellungen stehen in `.env`. Nach einer Änderung: `docker compose up -d
 | `ORDER_QUANTITY` | leer | Feste Stückzahl; hat Vorrang vor dem Budget |
 | `STOP_LOSS_PCT` | `8` | Abstand des Stop-Loss zum Limitpreis in Prozent |
 | `TAKE_PROFIT_PCT` | `15` | Abstand des Take-Profit zum Limitpreis in Prozent |
+| `ORDER_MAX_PRICE_GAP_PCT` | `5` | Kein Order-Vorschlag, wenn der Kurs mehr als so viel Prozent unter dem Insiderpreis liegt (höchstens `STOP_LOSS_PCT`) |
 | `ORDER_BUTTON_MAX_AGE_HOURS` | `24` | Danach ist der Order-Button wirkungslos |
 | `ANTHROPIC_MODEL` | `claude-haiku-5-5` | Modell für die Einstufung |
 | `FINNHUB_API_KEY` | leer | Kostenloser Schlüssel für Kursdaten. Leer: Der Workflow fragt nur Yahoo Finance |
-| `SEC_USER_AGENT` | leer | Kennung für Abrufe bei der SEC (Name und Kontaktadresse, wie die SEC es erbittet). Leer: `insider-pipeline/1.0` |
+| `SEC_USER_AGENT` | leer | Kennung für Abrufe bei der SEC: Name und E-Mail-Adresse, z. B. `Max Mustermann max@example.com`. Ohne E-Mail gibt die SEC keine Dokumente heraus – dann fehlen die Vertragsdetails zu Privatplatzierungen. Leer: `insider-pipeline/1.0` |
+| `RISK_FREE_RATE_PCT` | `4` | Zins für den Wert von Warrants (Black-Scholes), in Prozent |
 | `COMPOSE_PROFILES` | `ibkr` | Leer lassen, wenn du ein eigenes IBKR-Gateway betreibst |
 
 Den Prompt findest du in n8n im Node **Build_Prompt**, den Aufbau der Nachricht in **Build_Message**. Nach Änderungen in der Oberfläche auf „Publish“ klicken. `docker compose up -d` überschreibt einen vorhandenen Workflow nicht; die Version aus dem Repository spielst du wieder ein wie unter [Aktualisieren](#aktualisieren) beschrieben.
@@ -334,6 +398,8 @@ Aus der Entwicklungsumgebung waren sec-api.io, Yahoo Finance, Telegram und IBKR 
 - **Yahoo Finance blockt die Abrufe.** Gemessen am 14.11.2026 von einem Anschluss in Deutschland, mit derselben Kennung wie der Workflow: `fc.yahoo.com` liefert das Cookie (HTTP 404 mit `Set-Cookie`, keine Einwilligungsseite), aber schon der Crumb-Abruf (`/v1/test/getcrumb`) und auch `/v8/finance/chart` antworten mit HTTP 429 „Too Many Requests“ – nach nur wenigen Anfragen, vermutlich eine Bot-Erkennung. Yahoo ist deshalb nur noch Ersatzquelle.
 - **Finnhub mit echtem Schlüssel:** Antwortformate und Bedingungen stammen aus der offiziellen Dokumentation (Stand 15.11.2026). Getestet ist der Abruf nur gegen eine Nachbildung. Offen ist vor allem, wie vollständig Finnhub sehr kleine und außerbörslich gehandelte Titel abdeckt. Der Abschnitt [Marktdaten prüfen](#marktdaten-prüfen-ohne-sec-api-abrufe-zu-verbrauchen) zeigt, wie du das für ein Symbol ohne sec-api-Abrufe nachsiehst.
 - **Aktienzahl von der SEC:** Das Antwortformat ist gegen die echte Schnittstelle geprüft (15.11.2026), der Abruf aus n8n nur gegen eine Nachbildung. Bei Unternehmen mit mehreren Aktienklassen fehlt die Angabe häufig; dann bleibt die Marktkapitalisierung leer. Bei ausländischen Emittenten (20-F, 40-F) wird sie bewusst nicht berechnet.
+- **SEC-Dokumente zu Privatplatzierungen:** Das Verzeichnis der Filings (`data.sec.gov/submissions`) ist gegen die echte Schnittstelle geprüft (15.11.2026, NexGel: 8-K vom 12.11. mit den Items 1.01, 2.03, 3.02, 8.01 und 9.01). Filing-Index und Dokumente von `www.sec.gov` waren aus der Entwicklungsumgebung nicht abrufbar, weil die SEC dafür eine Kontaktadresse verlangt. Getestet ist das Auslesen gegen nachgebildete EDGAR-Seiten im üblichen Format. Prüfe beim ersten Fall die Zeile „Finanzierung:“ gegen das verlinkte 8-K.
+- **Auslese durch Claude:** Jede übernommene Angabe ist durch ein Zitat aus dem Dokument belegt. Fehlen kann trotzdem etwas, das im Dokument steht. Dann taucht es nicht in der Zeile auf, und Claude nennt es als Datenlücke.
 - **IBKR-Order:** Aufbau der Bracket-Order und Bestätigung der Rückfragen (`/iserver/reply`). Bitte die drei Orders nach dem ersten Klick in der App kontrollieren.
 - **IBeam-Login:** Die automatische Anmeldung ist für Paper-Zugangsdaten ohne Zwei-Faktor-Abfrage gedacht.
 - **Indexierung bei sec-api:** Der Workflow fragt ein neues Filing bis zu viermal im Abstand von 20 Sekunden ab. Dauert die Indexierung regelmäßig länger, bekommst du Fehlermeldungen „nicht in der Insider-Trading-API gefunden“.
@@ -356,6 +422,11 @@ Aus der Entwicklungsumgebung waren sec-api.io, Yahoo Finance, Telegram und IBKR 
 | „Finnhub: kein Kurs für …“ | Finnhub kennt das Symbol nicht (häufig bei außerbörslich gehandelten Titeln). Yahoo wird als Ersatz gefragt |
 | „Marktkap. n. v. (…)“ | Weder die Kursquelle noch die SEC nennen eine verwertbare Zahl; der Grund steht in der Klammer. Der Kurs stimmt trotzdem |
 | Nach dem Eintragen des Schlüssels steht weiter „Yahoo“ oder „kein Schlüssel“ in der Zeile | `docker compose up -d` ausführen, damit n8n den Schlüssel bekommt. Fehlen Quelle und Uhrzeit in der Zeile ganz, läuft noch der alte Workflow – siehe [Aktualisieren](#aktualisieren) |
+| „Vertragsdetails nicht ermittelt: Dokumente nicht abgerufen: SEC_USER_AGENT enthält keine E-Mail-Adresse …“ | In `.env` hinter `SEC_USER_AGENT=` Namen und E-Mail-Adresse eintragen, dann `docker compose up -d` |
+| „Vertragsdetails nicht ermittelt: … HTTP 403“ | Die SEC lehnt die Kennung ab. Namen und eine gültige E-Mail-Adresse eintragen; mit dem Abruf unter [Privatplatzierung prüfen](#privatplatzierung-prüfen) kontrollieren |
+| „Vertragsdetails nicht ermittelt: kein passendes Filing zwischen …“ | Das Unternehmen hat (noch) kein 8-K oder ähnliches Dokument zur Maßnahme eingereicht. Ein 8-K darf bis zu vier Geschäftstage nach dem Vertrag kommen |
+| „Kurs … liegt … unter dem Insiderpreis … – kein Order-Vorschlag“ | Absicht: Die Order würde sofort ausgeführt, der Stop-Loss womöglich gleich danach. Die Grenze stellt `ORDER_MAX_PRICE_GAP_PCT` ein (siehe [Kein Order-Vorschlag …](#kein-order-vorschlag-bei-kurs-weit-unter-dem-insiderpreis)) |
+| Bei einer Privatplatzierung fehlt die Zeile „Finanzierung:“ | n8n oder der Dienst `journal` arbeiten noch mit der alten Version – siehe [Aktualisieren](#aktualisieren), mit `--build` |
 | „IBKR-Gateway nicht erreichbar oder nicht eingeloggt“ | `docker compose logs ibkr-gateway` prüfen. Nach zu vielen Fehlanmeldungen beendet sich IBeam absichtlich: Zugangsdaten korrigieren, dann `docker compose up -d` |
 | IBKR antwortet mit „Access Denied“ | Das Gateway lässt die Adresse nicht zu: `ibkr/conf.yaml` muss eingebunden sein (Abschnitt `ips.allow`) |
 | Telegram-Button reagiert nicht | Für den Bot ist ein Webhook gesetzt oder ein zweites Programm fragt denselben Bot ab; das Bridge-Log nennt den Grund |
@@ -380,9 +451,9 @@ docker compose down               # stoppen (Daten bleiben im Volume n8n_data)
 | Posten | Kosten |
 |---|---|
 | sec-api.io „Personal & Startups“ | 55 USD/Monat (49 USD bei jährlicher Zahlung); zum Ausprobieren 100 Abrufe kostenlos – ein Testlauf mit `replay.js` braucht etwa vier |
-| Anthropic, Claude Haiku 5.5 | 0,10 USD je Mio. Eingabe- und 0,50 USD je Mio. Ausgabe-Tokens; pro Analyse unter 0,001 USD, bei 500 Analysen im Monat unter 0,50 USD |
+| Anthropic, Claude Haiku 5.5 | 0,10 USD je Mio. Eingabe- und 0,50 USD je Mio. Ausgabe-Tokens; pro Analyse unter 0,001 USD, bei 500 Analysen im Monat unter 0,50 USD. Bei einer Privatplatzierung kommt die Auslese der Vertragsdokumente dazu, unter 0,01 USD |
 | Finnhub (Kursdaten) | kostenlos für private Nutzung, 60 Abrufe pro Minute |
-| SEC (Aktienzahl), Yahoo Finance, Telegram, n8n, IBKR-Paper-Konto | kostenlos (für das Paper-Konto muss das IBKR-Live-Konto eingezahlt sein) |
+| SEC (Aktienzahl, Dokumente zu Privatplatzierungen), Yahoo Finance, Telegram, n8n, IBKR-Paper-Konto | kostenlos (für das Paper-Konto muss das IBKR-Live-Konto eingezahlt sein) |
 
 Die Preise ändern sich; maßgeblich sind die Preisseiten der Anbieter.
 
@@ -394,7 +465,7 @@ docker-compose.yml          alle Dienste
 n8n/init.sh                 legt Credentials an, importiert und veröffentlicht den Workflow
 n8n/workflows/              der n8n-Workflow (Quelle der Wahrheit)
 bridge/                     sec-api-Stream und Telegram-Klicks -> n8n-Webhooks, replay.js für Testläufe
-research/                   Datenbank und Signal-Protokoll (Dienst journal), Nachladen, Auswertung und Backtest
+research/                   Datenbank, Signal-Protokoll und SEC-Dokumente (Dienst journal), Nachladen, Auswertung und Backtest
 data/                       Datenbank, Protokoll, Berichte und Cache (bleibt lokal, nicht im Git)
 ibkr/conf.yaml              Gateway-Konfiguration (Zugriff aus dem Docker-Netz)
 test/e2e/                   End-to-End-Test mit Mock aller externen Dienste

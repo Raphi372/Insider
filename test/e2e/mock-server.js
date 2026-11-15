@@ -4,7 +4,8 @@
 //   /stream          sec-api.io Stream (WebSocket)
 //   /sec/...         sec-api.io REST (Insider-Trading, 13F-Holdings)
 //   /finnhub/...     Finnhub (Kurs, Unternehmensprofil, Kennzahlen)
-//   /secdata/...     SEC data.sec.gov (ausstehende Aktien)
+//   /secdata/...     SEC data.sec.gov (ausstehende Aktien, Verzeichnis der Filings)
+//   /secarchives/... SEC www.sec.gov (Filing-Index, 8-K und Anlagen)
 //   /yahoo...        Yahoo Finance (Cookie, Crumb, quoteSummary)
 //   /anthropic/...   Anthropic Messages API
 //   /telegram/...    Telegram Bot API
@@ -138,9 +139,24 @@ function handleFinnhub(req, res, url) {
 function handleSecData(req, res, url) {
   // Wie die SEC: ohne Kennung im User-Agent kein Zugriff.
   if (!String(req.headers['user-agent'] || '').trim()) return send(res, 403, 'Forbidden');
+  const submissions = url.pathname.match(/^\/secdata\/submissions\/CIK(\d{10})\.json$/);
+  if (submissions) {
+    const list = fixtures.secSubmissions(submissions[1]);
+    return list ? send(res, 200, list) : send(res, 404, 'NoSuchKey');
+  }
   const match = url.pathname.match(/^\/secdata\/api\/xbrl\/companyconcept\/CIK(\d{10})\/dei\/EntityCommonStockSharesOutstanding\.json$/);
   const data = match ? fixtures.secShares(match[1]) : null;
   return data ? send(res, 200, data) : send(res, 404, 'NoSuchKey');
+}
+
+// ---------------------------------------- SEC (www.sec.gov, EDGAR-Archiv)
+function handleSecArchives(req, res, url) {
+  // Wie die SEC: Dokumente gibt es nur mit Kontaktadresse (E-Mail) im User-Agent.
+  if (!/\S+@\S+\.\S+/.test(String(req.headers['user-agent'] || ''))) {
+    return send(res, 403, '<html><title>SEC.gov | Your Request Originates from an Undeclared Automated Tool</title></html>', { 'content-type': 'text/html' });
+  }
+  const page = fixtures.secArchive(url.pathname.replace(/^\/secarchives/, ''));
+  return page ? send(res, 200, page, { 'content-type': 'text/html' }) : send(res, 404, 'Not Found');
 }
 
 // -------------------------------------------------------------- Anthropic
@@ -157,6 +173,22 @@ function handleAnthropic(req, res, url, body) {
   const lastMessage = ((body || {}).messages || []).slice(-1)[0] || {};
   if (invalid || lastMessage.role !== 'user') {
     return send(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: `unsupported: ${invalid || 'prefill'}` } });
+  }
+  // Auslese von Vertragsbedingungen (Node Build_Extraction) – erkennbar am Schema.
+  const schema = (((body || {}).output_config || {}).format || {}).schema || {};
+  if (schema.properties && schema.properties.exchangeCapProzent) {
+    return send(res, 200, {
+      id: 'msg_e2e_extract',
+      type: 'message',
+      role: 'assistant',
+      model: body.model,
+      content: [
+        { type: 'thinking', thinking: '', signature: 'sig' },
+        { type: 'text', text: JSON.stringify(fixtures.extractionAnswer(body)) },
+      ],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 2500, output_tokens: 900 },
+    });
   }
   return send(res, 200, {
     id: 'msg_e2e',
@@ -203,7 +235,7 @@ function handleIbkr(req, res, url, body) {
 
   if (path === '/v1/api/trsrv/stocks') {
     const symbol = url.searchParams.get('symbols');
-    const known = { ACME: 111, LATE: 222, DOWN: 333, REJ: 444, PRCY: 555, FBCK: 666, CALC: 777 };
+    const known = { ACME: 111, LATE: 222, DOWN: 333, REJ: 444, PRCY: 555, FBCK: 666, CALC: 777, PIPX: 888 };
     const listings = known[symbol]
       ? [{ name: `${symbol} CORP`, chineseName: null, assetClass: 'STK', contracts: [
         { conid: 9000 + known[symbol], exchange: 'MEXI', isUS: false },
@@ -308,6 +340,7 @@ const server = http.createServer((req, res) => {
       if (service === 'yahoo') return handleYahoo(req, res, url);
       if (service === 'finnhub') return handleFinnhub(req, res, url);
       if (service === 'secdata') return handleSecData(req, res, url);
+      if (service === 'secarchives') return handleSecArchives(req, res, url);
       if (service === 'anthropic') return handleAnthropic(req, res, url, body);
       if (service === 'telegram') return await handleTelegram(req, res, url, body);
       if (service === 'ibkr') return handleIbkr(req, res, url, body);

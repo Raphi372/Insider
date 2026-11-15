@@ -73,6 +73,27 @@ test('parseForm4: ohne Verkauf bleibt "sale" leer, sehr lange Meldungen enden na
   assert.equal(long.purchase.shares, 1300, 'die Summen zählen trotzdem alle Zeilen');
 });
 
+test('parseForm4 erkennt einen Handelsplan nach Rule 10b5-1 auch am Kästchen im Formular (aff10b5One)', () => {
+  // Die Fußnote erwähnt keinen Handelsplan – die Textsuche allein fände nichts.
+  const doc = rawForm4({
+    accessionNo: 'a',
+    transactions: [rawTx('P', 5000, 10, 25000)],
+    footnotes: [{ text: 'The price reported is a weighted average price.' }],
+  });
+
+  const affirmed = parseForm4({ ...doc, aff10b5One: true });
+  assert.deepEqual([affirmed.mentions10b51, affirmed.tradingPlan10b51Affirmed], [true, true]);
+
+  // Kästchen nicht angekreuzt oder gar nicht im Dokument (Filings vor April 2023).
+  for (const signal of [parseForm4({ ...doc, aff10b5One: false }), parseForm4(doc)]) {
+    assert.deepEqual([signal.mentions10b51, signal.tradingPlan10b51Affirmed], [false, false]);
+  }
+
+  // Nennt nur der Text den Plan, bleibt das Kennzeichen des Kästchens aus: So lassen sich beide Quellen unterscheiden.
+  const textOnly = parseForm4({ ...doc, aff10b5One: false, remarks: 'Purchased pursuant to a Rule 10b5-1 trading plan.' });
+  assert.deepEqual([textOnly.mentions10b51, textOnly.tradingPlan10b51Affirmed], [true, false]);
+});
+
 test('Kauf-Filter: Kaufwert zählt, nicht die Stückzahl', () => {
   const few = parseForm4(rawForm4({ accessionNo: 'a', transactions: [rawTx('P', 300, 900, 300)] })); // 270.000 $
   const many = parseForm4(rawForm4({ accessionNo: 'b', transactions: [rawTx('P', 5000, 2, 5000)] })); // 10.000 $
@@ -160,6 +181,12 @@ test('Cluster: andere Insider desselben Unternehmens, die kurz zuvor gekauft hab
   assert.deepEqual([twin.otherInsiders, twin.insidersWithSamePurchase, twin.purchases.map((p) => p.sameAsThisPurchase)], [2, 2, [true, true]]);
   const other = db.findCluster({ ...query, purchase: { shares: 5000, value: 50500 } });
   assert.deepEqual([other.otherInsiders, other.insidersWithSamePurchase, other.purchases.map((p) => p.sameAsThisPurchase)], [2, 0, [false, false]], 'gleiche Stückzahl zu anderem Preis ist ein eigener Kauf');
+
+  // Gleicher Preis je Aktie bei anderer Stückzahl: typisch für mehrere Zeichner derselben Platzierung.
+  const placement = db.findCluster({ ...query, purchase: { shares: 1234, value: 12340, avgPrice: 10 } });
+  assert.deepEqual([placement.insidersWithSamePurchase, placement.insidersWithSamePrice, placement.purchases.map((p) => p.samePriceAsThisPurchase)], [0, 2, [true, true]]);
+  const cents = db.findCluster({ ...query, purchase: { shares: 1234, value: 12352.34, avgPrice: 10.01 } });
+  assert.deepEqual([cents.insidersWithSamePrice, cents.purchases.map((p) => p.samePriceAsThisPurchase)], [0, [false, false]], 'ein Cent Unterschied ist ein anderer Preis');
 
   assert.equal(db.findCluster({ issuerCik: '1', insiderCik: '200', filedAt: '2024-03-08T17:00:00-05:00', days: 14 }).otherInsiders, 1, 'eigene Käufe zählen nicht');
   assert.equal(db.findCluster({ issuerCik: '1', insiderCik: '500', filedAt: '2024-03-10T17:00:00-04:00', days: 1 }).otherInsiders, 0, 'außerhalb des Zeitfensters');
