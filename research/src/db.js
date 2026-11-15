@@ -73,7 +73,7 @@ function openDatabase(file) {
         accession_no, line, transaction_date, code, shares, price, acquired_disposed, shares_owned_after, ownership, security_title
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     cluster: db.prepare(`
-      SELECT insider_cik, insider_name, role, filed_date, purchase_shares, purchase_value
+      SELECT insider_cik, insider_name, role, filed_date, purchase_shares, purchase_value, purchase_avg_price
       FROM filings
       WHERE issuer_cik = ? AND insider_cik <> ? AND purchase_value > 0 AND filed_at_ms <= ? AND filed_at_ms >= ?
       ORDER BY filed_at_ms DESC`),
@@ -163,6 +163,10 @@ function openDatabase(file) {
     const samePurchase = (row) => Boolean(purchase) && Number(purchase.shares) > 0
       && row.purchase_shares === Number(purchase.shares)
       && Math.abs(row.purchase_value - Number(purchase.value)) < 0.005;
+    // Derselbe Preis je Aktie bis auf Bruchteile eines Cents: typisch für Käufe
+    // aus derselben Platzierung des Unternehmens, die mehrere Insider zeichnen.
+    const samePrice = (row) => Boolean(purchase) && Number(purchase.avgPrice) > 0
+      && Math.abs(Number(row.purchase_avg_price) - Number(purchase.avgPrice)) < 0.0001;
     return {
       windowDays: days,
       // Wie weit die Datenbank vor dieser Meldung zurückreicht. Ist das kürzer
@@ -170,6 +174,7 @@ function openDatabase(file) {
       historyDays: Number.isNaN(time) ? 0 : historyDays(time),
       otherInsiders: insiders.size,
       insidersWithSamePurchase: new Set(rows.filter(samePurchase).map((row) => row.insider_cik)).size,
+      insidersWithSamePrice: new Set(rows.filter(samePrice).map((row) => row.insider_cik)).size,
       totalValue: Math.round(rows.reduce((sum, row) => sum + row.purchase_value, 0) * 100) / 100,
       purchases: rows.slice(0, 5).map((row) => ({
         insiderName: row.insider_name,
@@ -178,6 +183,7 @@ function openDatabase(file) {
         shares: row.purchase_shares,
         value: row.purchase_value,
         sameAsThisPurchase: samePurchase(row),
+        samePriceAsThisPurchase: samePrice(row),
       })),
     };
   }

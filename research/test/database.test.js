@@ -161,6 +161,12 @@ test('Cluster: andere Insider desselben Unternehmens, die kurz zuvor gekauft hab
   const other = db.findCluster({ ...query, purchase: { shares: 5000, value: 50500 } });
   assert.deepEqual([other.otherInsiders, other.insidersWithSamePurchase, other.purchases.map((p) => p.sameAsThisPurchase)], [2, 0, [false, false]], 'gleiche Stückzahl zu anderem Preis ist ein eigener Kauf');
 
+  // Gleicher Preis je Aktie bei anderer Stückzahl: typisch für mehrere Zeichner derselben Platzierung.
+  const placement = db.findCluster({ ...query, purchase: { shares: 1234, value: 12340, avgPrice: 10 } });
+  assert.deepEqual([placement.insidersWithSamePurchase, placement.insidersWithSamePrice, placement.purchases.map((p) => p.samePriceAsThisPurchase)], [0, 2, [true, true]]);
+  const cents = db.findCluster({ ...query, purchase: { shares: 1234, value: 12352.34, avgPrice: 10.01 } });
+  assert.deepEqual([cents.insidersWithSamePrice, cents.purchases.map((p) => p.samePriceAsThisPurchase)], [0, [false, false]], 'ein Cent Unterschied ist ein anderer Preis');
+
   assert.equal(db.findCluster({ issuerCik: '1', insiderCik: '200', filedAt: '2024-03-08T17:00:00-05:00', days: 14 }).otherInsiders, 1, 'eigene Käufe zählen nicht');
   assert.equal(db.findCluster({ issuerCik: '1', insiderCik: '500', filedAt: '2024-03-10T17:00:00-04:00', days: 1 }).otherInsiders, 0, 'außerhalb des Zeitfensters');
   assert.equal(db.findCluster({ issuerCik: '1', insiderCik: '500', filedAt: '2024-03-05T17:00:00-05:00', days: 14 }).otherInsiders, 1, 'spätere Käufe waren noch nicht bekannt');
