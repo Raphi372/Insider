@@ -1175,8 +1175,10 @@ test('Build_Financing übernimmt nur belegte Angaben und rechnet Warrant-Wert, e
   // dem Form 4) und die Wandlung der Anleihe (3 Mio. $ / 5,50 $); im ungünstigsten Fall zur Untergrenze 2,00 $.
   assert.deepEqual(f.dilution, {
     sharesBefore: 6000000, sharesBeforeSource: '8-K', newShares: 1000000, warrantShares: 1000000, warrantSharesDerived: true,
-    conversionShares: 545455, maxPct: 42.4, worstCasePct: 58.3, exchangeCapPct: 19.99, exchangeCapShares: 1199400,
+    conversionShares: 545455, conversionSource: '8-K', placementPct: 33.3, conversionPct: 9.1,
+    maxPct: 42.4, worstCasePct: 58.3, exchangeCapPct: 19.99, exchangeCapShares: 1199400,
   });
+  assert.deepEqual(f.repricings, [], 'das Form 4 meldet keine geänderten Papiere');
 });
 
 test('Build_Financing nennt Gründe, wenn Dokumente, KI oder Kurs fehlen – und schätzt nichts dazu', async () => {
@@ -1236,11 +1238,41 @@ test('Build_Financing zählt nur die mitgekauften Warrants – geänderte älter
     old('Warrants (right to buy)', 'D', 16, 400000),
     old('Warrants (right to buy)', 'A', 13, 400000),
     old('Convertible Promissory Note', 'A', 5.5, 1180000),
+    old('Convertible Promissory Note', 'D', 12, 540833),
   ];
   const f = await financing({ signal: { ...base, derivatives }, context: TIMEOUT, skipExtraction: true });
   assert.deepEqual([f.warrants.count, f.warrants.perShare, f.warrants.exercisePrice, f.warrants.expiration], [133216, 1, 10, '2031-11-10']);
   assert.ok(f.effectivePrice.low > 0 && f.effectivePrice.high < 5.5, JSON.stringify(f.effectivePrice));
   assert.deepEqual(f.notes, ['SEC-Dokumente: Zeitüberschreitung']);
+
+  // Geänderte Bedingungen liest der Workflow direkt aus dem Form 4.
+  assert.deepEqual(f.repricings, [
+    { kind: 'Warrants', from: 16, to: 13, shares: 400000 },
+    { kind: 'Wandelpapiere', from: 12, to: 5.5, shares: 1180000 },
+  ]);
+  // Ohne Zahlen aus dem 8-K zählt für die Verwässerung die Wandelanleihe des Insiders laut Form 4:
+  // 1,18 Mio. Aktien auf rund 3,07 Mio. (Marktkapitalisierung ÷ Kurs).
+  assert.deepEqual(f.dilution, {
+    sharesBefore: 3072165, sharesBeforeSource: 'Marktkapitalisierung ÷ Kurs', newShares: null, warrantShares: null, warrantSharesDerived: false,
+    conversionShares: 1180000, conversionSource: 'Form 4', placementPct: null, conversionPct: 38.4,
+    maxPct: 38.4, worstCasePct: null, exchangeCapPct: null, exchangeCapShares: null,
+  });
+  const nxgl = (await run('Build_Message', {
+    input: contracts('ACME'),
+    nodes: { Config: config(), Build_Prompt: [{ facts: { ...FACTS, financing: f } }], LLM_Analysis: llmAnswer(VERDICT) },
+  }))[0].message;
+  assert.match(nxgl, /<b>Finanzierung:<\/b> Privatplatzierung · Warrants zu 10,00 \$ bis 10\.11\.2031 · geändert lt\. Form 4: Wandlungspreis 12,00 → 5,50 \$, ältere Warrants 16,00 → 13,00 \$ · Vertragsdetails nicht ermittelt/);
+  assert.match(nxgl, / · Verwässerung bis ca\. 38,4 %: Wandlung 38,4 % \(nur Papiere des Insiders, lt\. Form 4\), grob geschätzt\n/);
+
+  // Mit Zahlen aus dem 8-K für die Platzierung: beide Teile getrennt, wie bei NXGL.
+  const both = await financing({
+    signal: { ...base, derivatives },
+    extract: {
+      aktienImAngebot: ['1000000', 'the sale of 1,000,000 units'],
+      aktienVorher: ['6000000', 'more than 19.99% of its 6,000,000 outstanding shares'],
+    },
+  });
+  assert.deepEqual([both.dilution.placementPct, both.dilution.conversionPct, both.dilution.maxPct, both.dilution.conversionSource], [33.3, 19.7, 53, 'Form 4']);
 
   // Nur geänderte Altpapiere, keine gekauften Warrants: keine Rechnung auf falscher Grundlage.
   const onlyOld = await financing({ signal: { ...base, derivatives: derivatives.slice(1) }, context: TIMEOUT, skipExtraction: true });
@@ -1269,7 +1301,7 @@ test('Build_Message zeigt Finanzierung und Einordnung einer Privatplatzierung', 
   const v = f.warrants.valuation;
   assert.equal(lines.find((line) => line.startsWith('<b>Einordnung:</b>')),
     `<b>Einordnung:</b> Warrant ca. ${de(v.low)}–${de(v.high)} $ wert (Black-Scholes, Volatilität 60–140 %)`
-    + ` · effektiv ca. ${de(f.effectivePrice.low)}–${de(f.effectivePrice.high)} $ je Aktie · Verwässerung bis ca. 42,4 % (mit Reset bis 58,3 %)`);
+    + ` · effektiv ca. ${de(f.effectivePrice.low)}–${de(f.effectivePrice.high)} $ je Aktie · Verwässerung bis ca. 42,4 %: Platzierung 33,3 %, Wandlung 9,1 % – mit Reset bis 58,3 %`);
   // Die Zeilen stehen direkt unter dem Kauf, vor dem Cluster.
   assert.ok(lines.findIndex((line) => line.startsWith('<b>Finanzierung:</b>')) < lines.findIndex((line) => line.startsWith('<b>Cluster:</b>')));
 
